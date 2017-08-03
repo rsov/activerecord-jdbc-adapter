@@ -59,6 +59,15 @@ module ArJdbc
       Util::SerializedAttributes.setup /image/i, 'after_save_with_mssql_lob'
     end
 
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::MSSQLJdbcConnection
+
+    # @deprecated
+    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
+    def self.jdbc_connection_class; JdbcConnection end
+
+    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_column_class
+    def jdbc_column_class; ::ActiveRecord::ConnectionAdapters::MSSQLColumn end
+
     # @private
     @@update_lob_values = true
 
@@ -93,14 +102,6 @@ module ArJdbc
       MSSQL.update_lob_values? && ! prepared_statements? # && value
     end
 
-    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::MSSQLJdbcConnection
-    end
-
-    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_column_class
-    def jdbc_column_class; ::ActiveRecord::ConnectionAdapters::MSSQLColumn end
-
     # @see ActiveRecord::ConnectionAdapters::Jdbc::ArelSupport
     def self.arel_visitor_type(config)
       require 'arel/visitors/sql_server'
@@ -111,13 +112,6 @@ module ArJdbc
     def self.arel_visitor_type(config)
       require 'arel/visitors/sql_server'; ::Arel::Visitors::SQLServerNG
     end if AR42
-
-    # @deprecated no longer used
-    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#arel2_visitors
-    def self.arel2_visitors(config)
-      visitor = arel_visitor_type(config)
-      { 'mssql' => visitor, 'jdbcmssql' => visitor, 'sqlserver' => visitor }
-    end
 
     def configure_connection
       use_database # config[:database]
@@ -588,8 +582,9 @@ module ArJdbc
       end
     end
 
-    def remove_index(table_name, options = {})
-      execute "DROP INDEX #{quote_table_name(table_name)}.#{index_name(table_name, options)}"
+    # @override
+    def remove_index!(table_name, index_name)
+      execute "DROP INDEX #{quote_table_name(table_name)}.#{index_name}"
     end
 
     # @private
@@ -655,7 +650,7 @@ module ArJdbc
       unless primary_column # look for an id column and return it,
         # without changing case, to cover DBs with a case-sensitive collation :
         primary_column = columns.find { |column| column.name =~ /^id$/i }
-        raise "no columns for table: #{table_name}" if columns.empty?
+        raise "no columns for table: #{table_name} (SQL query: ' #{sql} ')" if columns.empty?
       end
       # NOTE: if still no PK column simply get something for ORDER BY ...
       "#{quote_table_name(table_name)}.#{quote_column_name((primary_column || columns.first).name)}"
@@ -794,7 +789,9 @@ end
 require 'arjdbc/util/quoted_cache'
 
 module ActiveRecord::ConnectionAdapters
-
+  class MSSQLColumn < JdbcColumn
+    include ::ArJdbc::MSSQL::Column
+  end
   class MSSQLAdapter < JdbcAdapter
     include ::ArJdbc::MSSQL
     include ::ArJdbc::Util::QuotedCache
@@ -806,14 +803,16 @@ module ActiveRecord::ConnectionAdapters
 
       setup_limit_offset!
     end
+    Column = MSSQLColumn
 
     def self.cs_equality_operator; ::ArJdbc::MSSQL.cs_equality_operator end
     def self.cs_equality_operator=(operator); ::ArJdbc::MSSQL.cs_equality_operator = operator end
 
   end
-
-  class MSSQLColumn < JdbcColumn
-    include ::ArJdbc::MSSQL::Column
-  end
-
 end
+
+#module ArJdbc
+#  module MSSQL
+#    Column = ::ActiveRecord::ConnectionAdapters::MSSQLColumn
+#  end
+#end

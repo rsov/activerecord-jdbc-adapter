@@ -1,17 +1,16 @@
-require File.expand_path('../../test/shared_helper', __FILE__)
-
 namespace :db do
 
   desc "Creates the test database for MySQL"
   task :mysql do
+    require File.expand_path('../../test/shared_helper', __FILE__)
     fail "could not create test database: mysql executable not found" unless mysql = which('mysql')
     load 'test/db/mysql_config.rb' # rescue nil
+    enc = MYSQL_CONFIG[:encoding] || 'utf8' # 'utf8mb4'
     puts MYSQL_CONFIG.inspect if $VERBOSE
     # DROP USER arjdbc@localhost; __ERROR 1396 (HY000): Operation CREATE USER failed__
     script = sql_script <<-SQL, 'mysql'
 DROP DATABASE IF EXISTS `#{MYSQL_CONFIG[:database]}`;
-CREATE USER #{MYSQL_CONFIG[:username]}@localhost;
-CREATE DATABASE `#{MYSQL_CONFIG[:database]}` DEFAULT CHARACTER SET `utf8` COLLATE `utf8_general_ci`;
+CREATE DATABASE `#{MYSQL_CONFIG[:database]}` DEFAULT CHARACTER SET `#{enc}` COLLATE `#{enc}_general_ci`;
 GRANT ALL PRIVILEGES ON `#{MYSQL_CONFIG[:database]}`.* TO #{MYSQL_CONFIG[:username]}@localhost;
 GRANT ALL PRIVILEGES ON `test\_%`.* TO #{MYSQL_CONFIG[:username]}@localhost;
 SET PASSWORD FOR #{MYSQL_CONFIG[:username]}@localhost = PASSWORD('#{MYSQL_CONFIG[:password]}');
@@ -28,6 +27,7 @@ SQL
 
   desc "Creates the test database for PostgreSQL"
   task :postgresql do
+    require File.expand_path('../../test/shared_helper', __FILE__)
     fail 'could not create test database: psql executable not found' unless psql = which('psql')
     fail 'could not create test database: missing "postgres" role' unless PostgresHelper.postgres_role?
     load 'test/db/postgres_config.rb' # rescue nil

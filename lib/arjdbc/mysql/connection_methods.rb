@@ -5,14 +5,9 @@ ArJdbc::ConnectionMethods.module_eval do
 
     return jndi_connection(config) if jndi_config?(config)
 
-    driver = config[:driver] ||=
-      defined?(::Jdbc::MySQL.driver_name) ? ::Jdbc::MySQL.driver_name : 'com.mysql.jdbc.Driver'
-
-    begin
-      require 'jdbc/mysql'
-      ::Jdbc::MySQL.load_driver(:require) if defined?(::Jdbc::MySQL.load_driver)
-    rescue LoadError # assuming driver.jar is on the class-path
-    end if mysql_driver = driver[0, 10] == 'com.mysql.'
+    driver = config[:driver] ||= 'com.mysql.jdbc.NonRegisteringDriver'
+    mysql_driver = driver.start_with?('com.mysql.')
+    ArJdbc.load_driver(:MySQL) if mysql_driver && config[:load_driver] != false
 
     config[:username] = 'root' unless config.key?(:username)
     # jdbc:mysql://[host][,failoverhost...][:port]/[database]
@@ -27,20 +22,22 @@ ArJdbc::ConnectionMethods.module_eval do
       config[:url] = url
     end
 
-    mariadb_driver = ! mysql_driver && driver[0, 12] == 'org.mariadb.' # org.mariadb.jdbc.Driver
+    mariadb_driver = ! mysql_driver && driver.start_with?('org.mariadb.')
 
     properties = ( config[:properties] ||= {} )
     if mysql_driver
       properties['zeroDateTimeBehavior'] ||= 'convertToNull'
       properties['jdbcCompliantTruncation'] ||= 'false'
-      properties['useUnicode'] = 'true' unless properties.key?('useUnicode') # otherwise platform default
       # NOTE: this is "better" than passing what users are used to set on MRI
       # e.g. 'utf8mb4' will fail cause the driver will check for a Java charset
       # ... it's smart enough to detect utf8mb4 from server variables :
       # "character_set_client" && "character_set_connection" (thus UTF-8)
-      if encoding = config.key?(:encoding) ? config[:encoding] : 'utf8'
+      if encoding = config[:encoding]
         properties['characterEncoding'] = convert_mysql_encoding(encoding) || encoding
+        # driver also executes: "SET NAMES " + (useutf8mb4 ? "utf8mb4" : "utf8")
+        config[:encoding] = nil # thus no need to do it on configure_connection
       end
+      # properties['useUnicode'] is true by default
       if ! ( reconnect = config[:reconnect] ).nil?
         properties['autoReconnect'] ||= reconnect.to_s
         # properties['maxReconnects'] ||= '3'
@@ -84,12 +81,7 @@ ArJdbc::ConnectionMethods.module_eval do
 
     return jndi_connection(config) if jndi_config?(config)
 
-    begin
-      require 'jdbc/mariadb'
-      ::Jdbc::MariaDB.load_driver(:require) if defined?(::Jdbc::MariaDB.load_driver)
-    rescue LoadError # assuming driver.jar is on the class-path
-    end
-
+    ArJdbc.load_driver(:MariaDB) unless config[:load_driver] == false
     config[:driver] ||= 'org.mariadb.jdbc.Driver'
 
     mysql_connection(config)

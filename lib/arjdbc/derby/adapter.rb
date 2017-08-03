@@ -15,17 +15,20 @@ module ArJdbc
       require 'arjdbc/derby/active_record_patch'
     end
 
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::DerbyJdbcConnection
+
+    # @deprecated
     # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::DerbyJdbcConnection
-    end
+    def self.jdbc_connection_class; JdbcConnection end
 
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn#column_types
     def self.column_selector
-      [ /derby/i, lambda { |config, column| column.extend(Column) } ]
+      [ /derby/i, lambda { |config, column| column.extend(ColumnMethods) } ]
     end
 
- 	# @private
+    def jdbc_column_class; ::ActiveRecord::ConnectionAdapters::DerbyAdapter::Column end
+
+ 	  # @private
     @@emulate_booleans = true
 
     # Boolean emulation can be disabled using :
@@ -38,9 +41,10 @@ module ArJdbc
     # @see #emulate_booleans?
     def self.emulate_booleans=(emulate); @@emulate_booleans = emulate; end
 
+    # @private
     # @note Part of this module is implemented in "native" Java.
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn
-    module Column
+    module ColumnMethods
 
       private
 
@@ -104,30 +108,14 @@ module ArJdbc
       ADAPTER_NAME
     end
 
-    # @private
-    def init_connection(jdbc_connection)
-      md = jdbc_connection.meta_data
-      major_version = md.database_major_version; minor_version = md.database_minor_version
-      if major_version < 10 || (major_version == 10 && minor_version < 5)
-        raise ::ActiveRecord::ConnectionNotEstablished, "Derby adapter requires Derby >= 10.5"
-      end
-      if major_version == 10 && minor_version < 8 # 10.8 ~ supports JDBC 4.1
-        config[:connection_alive_sql] ||=
-          'SELECT 1 FROM SYS.SYSSCHEMAS FETCH FIRST 1 ROWS ONLY' # FROM clause mandatory
-      else
-        # NOTE: since the loaded Java driver class can't change :
-        Derby.send(:remove_method, :init_connection) rescue nil
-      end
-    end
-
     def configure_connection
       # must be done or SELECT...FOR UPDATE won't work how we expect :
-      tx_isolation = config[:transaction_isolation] # set false to leave as is
-      tx_isolation = :serializable if tx_isolation.nil?
-      @connection.transaction_isolation = tx_isolation if tx_isolation
+      if tx_isolation = config[:transaction_isolation]
+        @connection.transaction_isolation = tx_isolation
+      end
       # if a user name was specified upon connection, the user's name is the
       # default schema for the connection, if a schema with that name exists
-      set_schema(config[:schema]) if config.key?(:schema)
+      set_schema(config[:schema]) if config[:schema]
     end
 
     def index_name_length
@@ -291,8 +279,8 @@ module ArJdbc
     private :classes_for_table_name
 
     # @override
-    def remove_index(table_name, options)
-      execute "DROP INDEX #{index_name(table_name, options)}"
+    def remove_index!(table_name, index_name)
+      execute "DROP INDEX #{quote_column_name(index_name)}"
     end
 
     # @override
@@ -551,5 +539,29 @@ module ArJdbc
 
     end
 
+    def self.const_missing(name)
+      if name.to_sym == :Column
+        ArJdbc.deprecate("#{self.name}::Column will change to refer to the actual column class, please use ColumnMethods instead", :once)
+        return ColumnMethods
+      end
+      super
+    end
+
   end
 end
+
+module ActiveRecord::ConnectionAdapters
+  class DerbyAdapter < JdbcAdapter
+    include ::ArJdbc::Derby
+
+    class Column < JdbcColumn
+      include ::ArJdbc::Derby::ColumnMethods
+    end
+  end
+end
+
+#module ArJdbc
+#  module Derby
+#    Column = ::ActiveRecord::ConnectionAdapters::DerbyAdapter::Column
+#  end
+#end

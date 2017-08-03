@@ -44,15 +44,14 @@ module ArJdbc
       Util::SerializedAttributes.setup /blob|clob/i, 'after_save_with_db2_lob'
     end
 
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::DB2JdbcConnection
+
+    # @deprecated
     # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::DB2JdbcConnection
-    end
+    def self.jdbc_connection_class; JdbcConnection end
 
     # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_column_class
-    def jdbc_column_class
-      ::ActiveRecord::ConnectionAdapters::DB2Column
-    end
+    def jdbc_column_class; ::ActiveRecord::ConnectionAdapters::DB2Column end
 
     # @see ActiveRecord::ConnectionAdapters::Jdbc::ArelSupport
     def self.arel_visitor_type(config = nil)
@@ -760,12 +759,6 @@ module ArJdbc
         end
     end
 
-    # @private
-    # @deprecated no longer used
-    def as400?
-      false
-    end
-
     def schema
       db2_schema
     end
@@ -803,11 +796,20 @@ module ArJdbc
 end
 
 module ActiveRecord::ConnectionAdapters
-
   remove_const(:DB2Column) if const_defined?(:DB2Column)
-
   class DB2Column < JdbcColumn
     include ::ArJdbc::DB2::Column
   end
-
+  remove_const(:DB2Adapter) if const_defined?(:DB2Adapter)
+  class DB2Adapter < JdbcAdapter
+    include ::ArJdbc::DB2
+    # @private Temporary until ArJdbc::DB2::Column is changed.
+    Column = DB2Column
+  end
 end
+
+#module ArJdbc
+#  module DB2
+#    Column = ::ActiveRecord::ConnectionAdapters::DB2Column
+#  end
+#end

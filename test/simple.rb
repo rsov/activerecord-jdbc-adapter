@@ -3,88 +3,7 @@ require 'test_helper'
 
 require 'set'
 
-require 'models/data_types'
-require 'models/entry'
-require 'models/auto_id'
-require 'models/string_id'
-require 'models/thing'
-require 'models/custom_pk_name'
-require 'models/validates_uniqueness_of_string'
-require 'models/add_not_null_column_to_table'
-
-ActiveRecord::Schema.verbose = false
-ActiveRecord::Base.time_zone_aware_attributes = true if ActiveRecord::Base.respond_to?(:time_zone_aware_attributes)
-ActiveRecord::Base.default_timezone = :utc
-
-module MigrationSetup
-
-  def setup
-    setup!
-  end
-
-  def teardown
-    teardown!
-  end
-
-  def setup!
-    MigrationSetup.setup!
-  end
-
-  def teardown!
-    MigrationSetup.teardown!
-  end
-
-  def self.setup!
-    DbTypeMigration.up
-    CreateStringIds.up
-    CreateEntries.up
-    CreateUsers.up
-    CreateAutoIds.up
-    CreateValidatesUniquenessOf.up
-    CreateThings.up
-    CreateCustomPkName.up
-  end
-
-  def self.teardown!
-    silent_down CreateCustomPkName
-    silent_down CreateThings
-    silent_down CreateValidatesUniquenessOf
-    silent_down CreateAutoIds
-    silent_down CreateUsers
-    silent_down CreateEntries
-    silent_down CreateStringIds
-    silent_down DbTypeMigration
-  end
-
-  def self.silent_down(migration)
-    begin
-      migration.down
-    rescue ActiveRecord::ActiveRecordError => e
-      warn "#{migration}.down failed: #{e.inspect}"
-    end
-  end
-
-end
-
-module FixtureSetup
-  include MigrationSetup
-
-  @@_time_zone = Time.respond_to?(:zone) ? Time.zone : nil
-
-  def setup
-    super
-    #
-    # just a random zone, unlikely to be local, and not UTC
-    Time.zone = 'Moscow' if Time.respond_to?(:zone)
-  end
-
-  def teardown
-    super
-    #
-    Time.zone = @@_time_zone if Time.respond_to?(:zone)
-  end
-
-end
+require 'models_setup'
 
 module ColumnNameQuotingTests
 
@@ -554,6 +473,19 @@ module SimpleTestMethods
     assert_equal 1, indexes.size
   end
 
+  def test_remove_nonexistent_index
+    assert_raise_kind_of(ArgumentError) do # ActiveRecord::StatementInvalid
+      connection.remove_index :entries, :nonexistent_index
+    end
+  end if Test::Unit::TestCase.ar_version('3.0')
+
+  def test_add_index_with_invalid_name_length
+    index_name = 'x' * (connection.index_name_length + 1)
+    assert_raise(ArgumentError) do
+      connection.add_index "entries", "title", :name => index_name
+    end
+  end if Test::Unit::TestCase.ar_version('3.0')
+
   def test_foreign_keys
     unless connection.supports_foreign_keys?
       skip "#{connection.class} does not support foreign keys"
@@ -631,7 +563,7 @@ module SimpleTestMethods
 
     def test_fetching_columns_for_nonexistent_table
       disable_logger(Animal.connection) do
-        assert_raise(ActiveRecord::StatementInvalid, ActiveRecord::JDBCError) do
+        assert_raise_kind_of(ActiveRecord::StatementInvalid) do
           Animal.columns
         end
       end
@@ -1305,13 +1237,42 @@ module SimpleTestMethods
     # due : `if ActiveRecord::Base.configurations.blank?; yield ...`
     User.connection.cache do # instead of simply `User.cache`
       id1 = user_1.id; id2 = user_2.id
-      assert_queries(2) { User.find(id1); User.find(id1); User.find(id2); User.find(id1) }
+      assert_queries(2, /SELECT/i) { User.find(id1); User.find(id1); User.find(id2); User.find(id1) }
     end
     User.connection.uncached do
       id1 = user_1.id; id3 = user_3.id
-      assert_queries(3) { User.find(id3); User.find(id1); User.find(id3) }
+      assert_queries(3, /SELECT/i) { User.find(id3); User.find(id1); User.find(id3) }
     end
   end
+
+  def test_where
+    user = User.create! :login => "blogger"
+    entry = Entry.create! :title => 'something', :content => 'JRuby on Rails !',
+                          :rating => 42.1, :user => user
+
+    entries = Entry.where(:title => entry.title)
+    assert_equal entry, entries.first
+  end if Test::Unit::TestCase.ar_version('3.0')
+
+  def test_update_all
+    user = User.create! :login => "blogger"
+    e1 = Entry.create! :title => 'JRuby #1', :content => 'Getting started with JRuby ...', :user => user
+    e2 = Entry.create! :title => 'JRuby #2', :content => 'Setting up with JRuby on Rails', :user => user
+
+    user.entries.update_all :rating => 12.3
+    assert_equal 12.3, e1.reload.rating
+    assert_equal 12.3, e2.reload.rating
+
+    user.entries.update_all :content => '... coming soon ...'
+    user.entries.update_all :rating => 10
+  end if Test::Unit::TestCase.ar_version('3.0')
+
+  def test_model_with_no_id
+    #assert_nothing_raised do
+    Thing.create! :name => "a thing"
+    #end
+    assert_equal 1, Thing.count
+  end if Test::Unit::TestCase.ar_version('3.0')
 
   def test_marshal
     expected = DbType.create!(
@@ -1321,6 +1282,7 @@ module SimpleTestMethods
       :sample_float => 10.5,
       :sample_boolean => true,
       :sample_decimal => 0.12345678,
+      :sample_date => Date.today,
       :sample_time => Time.now,
       :sample_binary => '01' * 512
     )
@@ -1328,6 +1290,10 @@ module SimpleTestMethods
 
     marshalled = Marshal.dump(expected)
     actual = Marshal.load(marshalled)
+
+    expected.attributes.each do |name, value|
+      assert_equal value, actual.attributes[name]
+    end
 
     assert_equal expected.attributes, actual.attributes
   end
@@ -1370,86 +1336,7 @@ module SimpleTestMethods
 
 end
 
-module MultibyteTestMethods
-  include MigrationSetup
-
-  if defined?(JRUBY_VERSION)
-    def setup
-      super
-      config = ActiveRecord::Base.connection.config
-      properties = config[:properties] || {}
-      jdbc_driver = ActiveRecord::ConnectionAdapters::JdbcDriver.new(config[:driver], properties)
-      @java_connection = jdbc_driver.connection(config[:url], config[:username], config[:password])
-      @java_connection.setAutoCommit(true)
-    end
-
-    def teardown
-      @java_connection.close
-      super
-    end
-
-    def test_select_multibyte_string
-      @java_connection.createStatement().
-        execute("insert into entries (id, title, content) values (1, 'テスト', '本文')")
-      entry = Entry.first
-      assert_equal "テスト", entry.title
-      assert_equal "本文", entry.content
-      assert_equal entry, Entry.find_by_title("テスト")
-    end
-
-    def test_update_multibyte_string
-      Entry.create!(:title => "テスト", :content => "本文")
-      rs = @java_connection.createStatement().
-        executeQuery("select title, content from entries")
-      assert rs.next
-      assert_equal "テスト", rs.getString(1)
-      assert_equal "本文", rs.getString(2)
-    end
-  end
-
-  def test_multibyte_aliasing
-    str = "テスト"
-    quoted_alias = Entry.connection.quote_column_name(str)
-    sql = "SELECT title AS #{quoted_alias} from entries"
-    records = Entry.connection.select_all(sql)
-    records.each do |rec|
-      rec.keys.each do |key|
-        assert_equal str, key
-      end
-    end
-  end
-
-  def test_chinese_word
-    chinese_word = '中文'
-    new_entry = Entry.create(:title => chinese_word)
-    new_entry.reload
-    assert_equal chinese_word, new_entry.title
-  end
-end
-
-module NonUTF8EncodingMethods
-  def setup
-    @connection = ActiveRecord::Base.remove_connection
-    latin2_connection = @connection.dup
-    latin2_connection[:encoding] = 'latin2'
-    latin2_connection.delete(:url) # pre-gen url gets stashed; remove to re-gen
-    ActiveRecord::Base.establish_connection latin2_connection
-    CreateEntries.up
-  end
-
-  def teardown
-    CreateEntries.down
-    ActiveRecord::Base.establish_connection @connection
-  end
-
-  def test_nonutf8_encoding_in_entry
-    prague_district = 'hradčany'
-    new_entry = Entry.create :title => prague_district
-    new_entry.reload
-    assert_equal prague_district, new_entry.title
-  end
-end
-
+# @deprecated
 module ActiveRecord3TestMethods
 
   def self.included(base)
@@ -1457,72 +1344,6 @@ module ActiveRecord3TestMethods
   end
 
   module TestMethods
-
-    def test_visitor_accessor
-      adapter = Entry.connection; config = Entry.connection_config
-      assert_not_nil adapter.visitor
-      assert_not_nil visitor_type = Arel::Visitors::VISITORS[ config[:adapter] ]
-      assert_kind_of visitor_type, adapter.visitor
-    end if Test::Unit::TestCase.ar_version('3.1') # >= 3.2
-
-    def test_arel_visitors
-      adapter = ActiveRecord::Base.connection; config = current_connection_config
-      visitors = Arel::Visitors::VISITORS.dup
-      assert_not_nil visitor_type = adapter.class.resolve_visitor_type(config)
-      assert_equal visitor_type, visitors[ config[:adapter] ]
-    end if Test::Unit::TestCase.ar_version('3.0') && defined? JRUBY_VERSION
-
-    def test_where
-      user = User.create! :login => "blogger"
-      entry = Entry.create! :title => 'something', :content => 'JRuby on Rails !', :rating => 42.1, :user => user
-
-      entries = Entry.where(:title => entry.title)
-      assert_equal entry, entries.first
-    end
-
-    def test_update_all
-      user = User.create! :login => "blogger"
-      e1 = Entry.create! :title => 'JRuby #1', :content => 'Getting started with JRuby ...', :user => user
-      e2 = Entry.create! :title => 'JRuby #2', :content => 'Setting up with JRuby on Rails', :user => user
-
-      user.entries.update_all :rating => 12.3
-      assert_equal 12.3, e1.reload.rating
-      assert_equal 12.3, e2.reload.rating
-
-      user.entries.update_all :content => '... coming soon ...'
-      user.entries.update_all :rating => 10
-    end
-
-    def test_remove_nonexistent_index
-      errors = [ ArgumentError, ActiveRecord::StatementInvalid ]
-      errors << ActiveRecord::JDBCError if defined? JRUBY_VERSION
-      assert_raise(*errors) { connection.remove_index :entries, :nonexistent_index }
-    end
-
-    def test_add_index_with_invalid_name_length
-      index_name = 'x' * (connection.index_name_length + 1)
-      assert_raise(ArgumentError) do
-        connection.add_index "entries", "title", :name => index_name
-      end
-    end
-
-    def test_model_with_no_id
-      #assert_nothing_raised do
-      Thing.create! :name => "the thing"
-      #end
-      assert_equal 1, Thing.count
-    end
-
-    def test_arel
-      Thing.create! :name => 'a3'
-      Thing.create! :name => 'a1'
-      Thing.create! :name => 'a4'
-      Thing.create! :name => 'a2'
-
-      things = Thing.order(:name).limit(2).offset(1)
-      assert_equal %w(a2 a3), things.map(&:name)
-    end
-
   end
 
 end

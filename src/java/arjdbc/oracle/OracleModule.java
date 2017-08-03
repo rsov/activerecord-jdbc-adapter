@@ -27,6 +27,7 @@ import static arjdbc.util.QuotingUtils.BYTES_0;
 import static arjdbc.util.QuotingUtils.BYTES_1;
 import static arjdbc.util.QuotingUtils.quoteCharWith;
 
+import org.jruby.Ruby;
 import org.jruby.RubyModule;
 import org.jruby.RubyString;
 import org.jruby.anno.JRubyMethod;
@@ -38,12 +39,17 @@ import org.jruby.runtime.builtin.IRubyObject;
  *
  * @author kares
  */
+@org.jruby.anno.JRubyModule(name = "ArJdbc::Oracle")
 public class OracleModule {
 
     public static RubyModule load(final RubyModule arJdbc) {
         RubyModule oracle = arJdbc.defineModuleUnder("Oracle");
         oracle.defineAnnotatedMethods( OracleModule.class );
         return oracle;
+    }
+
+    public static RubyModule load(final Ruby runtime) {
+        return load( arjdbc.ArJdbcModule.get(runtime) );
     }
 
     @JRubyMethod(name = "quote_string", required = 1)
@@ -62,14 +68,14 @@ public class OracleModule {
     public static IRubyObject quoted_true(
             final ThreadContext context,
             final IRubyObject self) {
-        return RubyString.newString(context.getRuntime(), BYTES_1);
+        return RubyString.newString(context.runtime, BYTES_1);
     }
 
     @JRubyMethod(name = "quoted_false", required = 0)
     public static IRubyObject quoted_false(
             final ThreadContext context,
             final IRubyObject self) {
-        return RubyString.newString(context.getRuntime(), BYTES_0);
+        return RubyString.newString(context.runtime, BYTES_0);
     }
 
 }

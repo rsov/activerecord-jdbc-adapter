@@ -34,10 +34,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 
-import org.jcodings.specific.UTF8Encoding;
-
 import org.jruby.Ruby;
 import org.jruby.RubyArray;
+import org.jruby.RubyBoolean;
 import org.jruby.RubyClass;
 import org.jruby.RubyString;
 import org.jruby.anno.JRubyMethod;
@@ -50,10 +49,11 @@ import org.jruby.util.ByteList;
  *
  * @author nicksieger
  */
+//@org.jruby.anno.JRubyClass(name = "ActiveRecord::ConnectionAdapters::MSSQLJdbcConnection")
 public class MSSQLRubyJdbcConnection extends RubyJdbcConnection {
     private static final long serialVersionUID = -745716565005219263L;
 
-    protected MSSQLRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
+    public MSSQLRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
         super(runtime, metaClass);
     }
 
@@ -61,8 +61,12 @@ public class MSSQLRubyJdbcConnection extends RubyJdbcConnection {
         final RubyClass clazz = getConnectionAdapters(runtime). // ActiveRecord::ConnectionAdapters
             defineClassUnder("MSSQLJdbcConnection", jdbcConnection, ALLOCATOR);
         clazz.defineAnnotatedMethods(MSSQLRubyJdbcConnection.class);
-        getConnectionAdapters(runtime).setConstant("MssqlJdbcConnection", clazz); // backwards-compat
         return clazz;
+    }
+
+    public static RubyClass load(final Ruby runtime) {
+        RubyClass jdbcConnection = getJdbcConnection(runtime);
+        return createMSSQLJdbcConnectionClass(runtime, jdbcConnection);
     }
 
     private static final ObjectAllocator ALLOCATOR = new ObjectAllocator() {
@@ -74,9 +78,9 @@ public class MSSQLRubyJdbcConnection extends RubyJdbcConnection {
     private static final byte[] EXEC = new byte[] { 'e', 'x', 'e', 'c' };
 
     @JRubyMethod(name = "exec?", required = 1, meta = true, frame = false)
-    public static IRubyObject exec_p(ThreadContext context, IRubyObject self, IRubyObject sql) {
-        final ByteList sqlBytes = sql.convertToString().getByteList();
-        return context.getRuntime().newBoolean( startsWithIgnoreCase(sqlBytes, EXEC) );
+    public static RubyBoolean exec_p(ThreadContext context, IRubyObject self, IRubyObject sql) {
+        final ByteList sqlBytes = sql.asString().getByteList();
+        return context.runtime.newBoolean( startsWithIgnoreCase(sqlBytes, EXEC) );
     }
 
     @Override
@@ -143,16 +147,10 @@ public class MSSQLRubyJdbcConnection extends RubyJdbcConnection {
     }
 
     @Override
-    protected ColumnData[] extractColumns(final Ruby runtime,
+    protected ColumnData[] extractColumns(final ThreadContext context,
         final Connection connection, final ResultSet resultSet,
         final boolean downCase) throws SQLException {
-        return filterRowNumFromColumns( super.extractColumns(runtime, connection, resultSet, downCase) );
-    }
-
-    private static final ByteList _row_num; // "_row_num"
-    static {
-        _row_num = new ByteList(new byte[] { '_','r','o','w','_','n','u','m' }, false);
-        _row_num.setEncoding(UTF8Encoding.INSTANCE);
+        return filterRowNumFromColumns( super.extractColumns(context, connection, resultSet, downCase) );
     }
 
     /**
@@ -160,7 +158,7 @@ public class MSSQLRubyJdbcConnection extends RubyJdbcConnection {
      */
     private static ColumnData[] filterRowNumFromColumns(final ColumnData[] columns) {
         for ( int i = 0; i < columns.length; i++ ) {
-            if ( _row_num.equal( columns[i].name.getByteList() ) ) {
+            if ( "_row_num".equals( columns[i].getName() ) ) {
                 final ColumnData[] filtered = new ColumnData[columns.length - 1];
 
                 if ( i > 0 ) {
@@ -179,15 +177,15 @@ public class MSSQLRubyJdbcConnection extends RubyJdbcConnection {
 
     // internal helper not meant as a "public" API - used in one place thus every
     @JRubyMethod(name = "jtds_driver?")
-    public IRubyObject jtds_driver_p(final ThreadContext context) throws SQLException {
+    public RubyBoolean jtds_driver_p(final ThreadContext context) throws SQLException {
         // "jTDS Type 4 JDBC Driver for MS SQL Server and Sybase"
         // SQLJDBC: "Microsoft JDBC Driver 4.0 for SQL Server"
-        return withConnection(context, new Callable<IRubyObject>() {
+        return withConnection(context, new Callable<RubyBoolean>() {
             // NOTE: only used in one place for now (on release_savepoint) ...
             // might get optimized to only happen once since driver won't change
-            public IRubyObject call(final Connection connection) throws SQLException {
+            public RubyBoolean call(final Connection connection) throws SQLException {
                 final String driver = connection.getMetaData().getDriverName();
-                return context.getRuntime().newBoolean( driver.indexOf("jTDS") >= 0 );
+                return context.runtime.newBoolean( driver.indexOf("jTDS") >= 0 );
             }
         });
     }

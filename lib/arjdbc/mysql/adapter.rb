@@ -16,69 +16,63 @@ module ArJdbc
     # @private
     ActiveRecordError = ::ActiveRecord::ActiveRecordError
 
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::MySQLJdbcConnection
+
+    # @deprecated
     # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::MySQLJdbcConnection
-    end
-
-    def jdbc_column_class
-      ::ActiveRecord::ConnectionAdapters::MysqlAdapter::Column
-    end
-
-    # @private
-    def init_connection(jdbc_connection)
-      meta = jdbc_connection.meta_data
-      if meta.driver_major_version == 1 # TODO check in driver code
-        # assumes MariaDB 1.x currently
-      elsif meta.driver_major_version < 5
-        raise ::ActiveRecord::ConnectionNotEstablished,
-          "MySQL adapter requires driver >= 5.0 got: '#{meta.driver_version}'"
-      elsif meta.driver_major_version == 5 && meta.driver_minor_version < 1
-        config[:connection_alive_sql] ||= 'SELECT 1' # need 5.1 for JDBC 4.0
-      else
-        # NOTE: since the loaded Java driver class can't change :
-        MySQL.send(:remove_method, :init_connection) rescue nil
-      end
-    end
+    def self.jdbc_connection_class; JdbcConnection end
 
     def configure_connection
-      variables = config[:variables] || {}
-      # By default, MySQL 'where id is null' selects the last inserted id. Turn this off.
-      variables[:sql_auto_is_null] = 0 # execute "SET SQL_AUTO_IS_NULL=0"
+      unless ( variables = config[:variables] ) == false # AR-JDBC allows disabling
+        # as this can be configured with a JDBC pool, defaults executed are :
+        #   SET NAMES utf8,
+        #       @@SESSION.sql_auto_is_null = 0,
+        #       @@SESSION.wait_timeout = 2147483,
+        #       @@SESSION.sql_mode = 'STRICT_ALL_TABLES'
 
-      # Increase timeout so the server doesn't disconnect us.
-      wait_timeout = config[:wait_timeout]
-      wait_timeout = self.class.type_cast_config_to_integer(wait_timeout)
-      variables[:wait_timeout] = wait_timeout.is_a?(Integer) ? wait_timeout : 2147483
+        variables ||= {}
+        # By default, MySQL 'where id is null' selects the last inserted id. Turn this off.
+        variables[:sql_auto_is_null] = 0 # execute "SET SQL_AUTO_IS_NULL=0"
 
-      # Make MySQL reject illegal values rather than truncating or blanking them, see
-      # http://dev.mysql.com/doc/refman/5.0/en/server-sql-mode.html#sqlmode_strict_all_tables
-      # If the user has provided another value for sql_mode, don't replace it.
-      if strict_mode? && ! variables.has_key?(:sql_mode)
-        variables[:sql_mode] = 'STRICT_ALL_TABLES' # SET SQL_MODE='STRICT_ALL_TABLES'
+        # Increase timeout so the server doesn't disconnect us.
+        wait_timeout = config[:wait_timeout]
+        wait_timeout = self.class.type_cast_config_to_integer(wait_timeout)
+        variables[:wait_timeout] = wait_timeout.is_a?(Integer) ? wait_timeout : 2147483
+
+        # Make MySQL reject illegal values rather than truncating or blanking them, see
+        # http://dev.mysql.com/doc/refman/5.0/en/server-sql-mode.html#sqlmode_strict_all_tables
+        # If the user has provided another value for sql_mode, don't replace it.
+        if strict_mode? && ! variables.has_key?(:sql_mode)
+          variables[:sql_mode] = 'STRICT_ALL_TABLES' # SET SQL_MODE='STRICT_ALL_TABLES'
+        end
+
+        # Gather up all of the SET variables...
+        variable_assignments = variables.map do |k, v|
+          if v == ':default' || v == :default
+            "@@SESSION.#{k} = DEFAULT" # Sets the value to the global or compile default
+          elsif ! v.nil?
+            "@@SESSION.#{k} = #{quote(v)}"
+          end
+          # or else nil; compact to clear nils out
+        end
+        variable_assignments.compact!
       end
 
       # NAMES does not have an equals sign, see
       # http://dev.mysql.com/doc/refman/5.0/en/set-statement.html#id944430
       # (trailing comma because variable_assignments will always have content)
-      encoding = "NAMES #{config[:encoding]}, " if config[:encoding]
-
-      # Gather up all of the SET variables...
-      variable_assignments = variables.map do |k, v|
-        if v == ':default' || v == :default
-          "@@SESSION.#{k.to_s} = DEFAULT" # Sets the value to the global or compile default
-        elsif ! v.nil?
-          "@@SESSION.#{k.to_s} = #{quote(v)}"
-        end
-        # or else nil; compact to clear nils out
-      end.compact.join(', ')
+      if encoding = config[:encoding]
+        ( variable_assignments ||= [] ).unshift("NAMES #{encoding}")
+      end
 
       # ...and send them all in one query
-      execute("SET #{encoding} #{variable_assignments}", :skip_logging)
+      execute("SET #{variable_assignments.join(', ')}", :skip_logging) if variable_assignments
     end
 
-    def strict_mode?
-      config.key?(:strict) ?
+    def strict_mode? # strict_mode is default since AR 4.0
+      return @strict_mode unless ( @strict_mode ||= nil ).nil?
+
+      @strict_mode = config.key?(:strict) ?
         self.class.type_cast_config_to_boolean(config[:strict]) :
           AR40 # strict_mode is default since AR 4.0
     end
@@ -188,12 +182,12 @@ module ArJdbc
 
     # @private Only for Rails core compatibility.
     def new_column(field, default, type, null, collation, extra = "")
-      jdbc_column_class.new(field, default, type, null, collation, strict_mode?, extra)
+      Column.new(field, default, type, null, collation, strict_mode?, extra)
     end unless AR42
 
     # @private Only for Rails core compatibility.
     def new_column(field, default, cast_type, sql_type = nil, null = true, collation = "", extra = "")
-      jdbc_column_class.new(field, default, cast_type, sql_type, null, collation, strict_mode?, extra)
+      Column.new(field, default, cast_type, sql_type, null, collation, strict_mode?, extra)
     end if AR42
 
     # @private Only for Rails core compatibility.
@@ -288,6 +282,36 @@ module ArJdbc
 
     # NOTE: handled by JdbcAdapter only to have statements in logs :
 
+    # @private
+    BEGIN_LOG = '/* BEGIN */ SET autocommit=0'
+    private_constant :BEGIN_LOG if respond_to?(:private_constant)
+
+    # @override
+    def begin_db_transaction
+      log(BEGIN_LOG) { @connection.begin }
+    end
+
+    # @override
+    def commit_db_transaction
+      log('COMMIT; SET autocommit=1') { @connection.commit }
+    end
+
+    # @override
+    def rollback_db_transaction
+      log('ROLLBACK; SET autocommit=1') { @connection.rollback }
+    end
+
+    # Starts a database transaction.
+    # @param isolation the transaction isolation to use
+    # @since 1.3.0
+    # @override on **AR-4.0**
+    def begin_isolated_db_transaction(isolation)
+      name = isolation.to_s.upcase; name.sub!('_', ' ')
+      log("SET TRANSACTION ISOLATION LEVEL #{name}; #{BEGIN_LOG}") do
+        @connection.begin(isolation)
+      end
+    end
+
     # @override
     def supports_savepoints?
       true
@@ -295,17 +319,17 @@ module ArJdbc
 
     # @override
     def create_savepoint(name = current_savepoint_name(true))
-      log("SAVEPOINT #{name}", 'Savepoint') { super }
+      log("SAVEPOINT #{name}") { @connection.create_savepoint(name) }
     end
 
     # @override
     def rollback_to_savepoint(name = current_savepoint_name(true))
-      log("ROLLBACK TO SAVEPOINT #{name}", 'Savepoint') { super }
+      log("ROLLBACK TO SAVEPOINT #{name}") { @connection.rollback_savepoint(name) }
     end
 
     # @override
     def release_savepoint(name = current_savepoint_name(false))
-      log("RELEASE SAVEPOINT #{name}", 'Savepoint') { super }
+      log("RELEASE SAVEPOINT #{name}") { @connection.release_savepoint(name) }
     end
 
     def disable_referential_integrity
@@ -319,31 +343,7 @@ module ArJdbc
     end
 
     # @override make it public just like native MySQL adapter does
-    def update_sql(sql, name = nil)
-      super
-    end
-
-    # SCHEMA STATEMENTS ========================================
-
-    # @deprecated no longer used - handled with (AR built-in) Rake tasks
-    def structure_dump
-      # NOTE: due AR (2.3-3.2) compatibility views are not included
-      if supports_views?
-        sql = "SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'"
-      else
-        sql = "SHOW TABLES"
-      end
-
-      @connection.execute_query_raw(sql).map do |table|
-        # e.g. { "Tables_in_arjdbc_test"=>"big_fields", "Table_type"=>"BASE TABLE" }
-        table.delete('Table_type')
-        table_name = table.to_a.first.last
-
-        create_table = select_one("SHOW CREATE TABLE #{quote_table_name(table_name)}")
-
-        "#{create_table['Create Table']};\n\n"
-      end.join
-    end
+    def update_sql(sql, name = nil); super end
 
     # Returns just a table's primary key.
     # @override
@@ -412,9 +412,9 @@ module ArJdbc
         null = field['Null'] == "YES"
         if pass_cast_type
           cast_type = lookup_cast_type(sql_type)
-          jdbc_column_class.new(field['Field'], field['Default'], cast_type, sql_type, null, field['Collation'], strict, field['Extra'])
+          Column.new(field['Field'], field['Default'], cast_type, sql_type, null, field['Collation'], strict, field['Extra'])
         else
-          jdbc_column_class.new(field['Field'], field['Default'], sql_type, null, field['Collation'], strict, field['Extra'])
+          Column.new(field['Field'], field['Default'], sql_type, null, field['Collation'], strict, field['Extra'])
         end
       end
       columns
@@ -964,27 +964,12 @@ module ActiveRecord
       def self.emulate_booleans=(emulate); ::ArJdbc::MySQL.emulate_booleans = emulate; end
 
       class Column < JdbcColumn
-        include ::ArJdbc::MySQL::Column
+        include ::ArJdbc::MySQL::ColumnMethods
 
-        # @note {#ArJdbc::MySQL::Column} uses this to check for boolean emulation
-        def adapter
-          MysqlAdapter
-        end
+        # @note {#ArJdbc::MySQL::ColumnMethods} uses this to check for boolean emulation
+        def adapter; MysqlAdapter end
 
       end
-
-      #def initialize(*args)
-      #  super # configure_connection happens in super
-      #end
-
-      def jdbc_connection_class(spec)
-        ::ArJdbc::MySQL.jdbc_connection_class
-      end
-
-      def jdbc_column_class
-        Column
-      end
-
     end
 
     if ActiveRecord::VERSION::MAJOR < 3 ||
@@ -1003,5 +988,11 @@ module ActiveRecord
       end
     end
 
+  end
+end
+
+module ArJdbc
+  module MySQL
+    Column = ::ActiveRecord::ConnectionAdapters::MysqlAdapter::Column
   end
 end

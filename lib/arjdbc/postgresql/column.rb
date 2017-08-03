@@ -3,7 +3,7 @@ module ArJdbc
 
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn#column_types
     def self.column_selector
-      [ /postgre/i, lambda { |cfg, column| column.extend(Column) } ]
+      [ /postgre/i, lambda { |cfg, column| column.extend(ColumnMethods) } ]
     end
 
     # @private these are defined on the Adapter class since 4.2
@@ -49,7 +49,7 @@ module ArJdbc
 
     # Column behavior based on PostgreSQL adapter in Rails.
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn
-    module Column
+    module ColumnMethods
 
       attr_accessor :array
       alias array? array
@@ -73,7 +73,7 @@ module ArJdbc
     end if AR42
 
     # @private (AR < 4.2 version) documented above
-    module Column
+    module ColumnMethods
 
       def initialize(name, default, oid_type = nil, sql_type = nil, null = true,
           fmod = nil, adapter = nil) # added due resolving #oid_type
@@ -246,11 +246,11 @@ module ArJdbc
         else
           if ( sql_type = self.sql_type.to_s ) == 'money'
             self.class.string_to_money(value)
-          elsif sql_type[0, 5] == 'point'
+          elsif sql_type.start_with?('point')
             value.is_a?(String) ? self.class.string_to_point(value) : value
-          elsif sql_type[0, 3] == 'bit' || sql_type[0, 6] == 'varbit'
+          elsif sql_type.start_with?('bit') || sql_type.start_with?('varbit')
             value.is_a?(String) ? self.class.string_to_bit(value) : value
-          elsif sql_type[-5, 5] == 'range'
+          elsif sql_type.end_with?('range')
             return if value.nil? || value == 'empty'
             return value if value.is_a?(::Range)
 
@@ -625,7 +625,7 @@ module ArJdbc
           if ::Array === value
             value.map { |item| type_cast_array(oid, item) }
           else
-            if oid.is_a?(Column)
+            if oid.is_a?(ColumnMethods)
               oid.type_cast value, oid.type # column.type
             else
               oid.type_cast value

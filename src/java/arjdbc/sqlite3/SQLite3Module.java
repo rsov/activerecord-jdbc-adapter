@@ -23,8 +23,10 @@
  */
 package arjdbc.sqlite3;
 
+import static arjdbc.util.QuotingUtils.quoteCharAndDecorateWith;
 import static arjdbc.util.QuotingUtils.quoteCharWith;
 
+import org.jruby.Ruby;
 import org.jruby.RubyModule;
 import org.jruby.RubyString;
 import org.jruby.anno.JRubyMethod;
@@ -34,21 +36,26 @@ import org.jruby.util.ByteList;
 
 /**
  * ArJdbc::SQLite3
- * 
+ *
  * @author kares
  */
+@org.jruby.anno.JRubyModule(name = "ArJdbc::SQLite3")
 public class SQLite3Module {
-    
+
     public static RubyModule load(final RubyModule arJdbc) {
         RubyModule sqlite3 = arJdbc.defineModuleUnder("SQLite3");
         sqlite3.defineAnnotatedMethods( SQLite3Module.class );
         return sqlite3;
     }
-    
-    @JRubyMethod(name = "quote_string", required = 1, frame = false)
+
+    public static RubyModule load(final Ruby runtime) {
+        return load( arjdbc.ArJdbcModule.get(runtime) );
+    }
+
+    @JRubyMethod(name = "quote_string", required = 1)
     public static IRubyObject quote_string(
-            final ThreadContext context, 
-            final IRubyObject self, 
+            final ThreadContext context,
+            final IRubyObject self,
             final IRubyObject string) { // string.gsub("'", "''") :
         final char single = '\'';
         final RubyString quoted = quoteCharWith(
@@ -58,21 +65,29 @@ public class SQLite3Module {
     }
 
     private static final ByteList Q_TRUE = new ByteList(new byte[] { '\'', 't', '\'' }, false);
-    
-    @JRubyMethod(name = "quoted_true", required = 0, frame = false)
+
+    @JRubyMethod(name = "quoted_true", required = 0)
     public static IRubyObject quoted_true(
-            final ThreadContext context, 
+            final ThreadContext context,
             final IRubyObject self) {
-        return RubyString.newString(context.getRuntime(), Q_TRUE);
+        return RubyString.newString(context.runtime, Q_TRUE);
     }
 
     private static final ByteList Q_FALSE = new ByteList(new byte[] { '\'', 'f', '\'' }, false);
-    
-    @JRubyMethod(name = "quoted_false", required = 0, frame = false)
+
+    @JRubyMethod(name = "quoted_false", required = 0)
     public static IRubyObject quoted_false(
-            final ThreadContext context, 
+            final ThreadContext context,
             final IRubyObject self) {
-        return RubyString.newString(context.getRuntime(), Q_FALSE);
+        return RubyString.newString(context.runtime, Q_FALSE);
     }
-    
+
+    @JRubyMethod(name = "quote_column_name", required = 1)
+    public static IRubyObject quote_column_name(
+            final ThreadContext context,
+            final IRubyObject self,
+            final IRubyObject string) { // "#{name.to_s.gsub('"', '""')}"
+        return quoteCharAndDecorateWith(context, string.asString(), '"', '"', (byte) '"', (byte) '"');
+    }
+
 }

@@ -5,23 +5,20 @@ module ArJdbc
   module H2
     include HSQLDB
 
-    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::H2JdbcConnection
-    end
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::H2JdbcConnection
 
-    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_column_class
-    def jdbc_column_class
-      ::ActiveRecord::ConnectionAdapters::H2Column
-    end
+    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
+    def self.jdbc_connection_class; JdbcConnection end
 
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn#column_types
     def self.column_selector
-      [ /\.h2\./i, lambda { |config, column| column.extend(Column) } ]
+      [ /\.h2\./i, lambda { |config, column| column.extend(ColumnMethods) } ]
     end
 
+    # @since 1.4.0
+    # @private Internal - mostly due {#column_selector}.
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn
-    module Column
+    module ColumnMethods
 
       private
 
@@ -77,6 +74,12 @@ module ArJdbc
 
     end
 
+    # H2's (JDBC) column class
+    # @since 1.4.0
+    class Column < ::ActiveRecord::ConnectionAdapters::JdbcColumn
+      include ColumnMethods
+    end
+
     # @see ActiveRecord::ConnectionAdapters::Jdbc::ArelSupport
     def self.arel_visitor_type(config = nil)
       require 'arel/visitors/h2'; ::Arel::Visitors::H2
@@ -87,11 +90,6 @@ module ArJdbc
     # @override
     def adapter_name
       ADAPTER_NAME
-    end
-
-    # @deprecated no longer used. only here for backwards compatibility with 1.2
-    def h2_adapter
-      true
     end
 
     NATIVE_DATABASE_TYPES = {
@@ -167,13 +165,15 @@ module ArJdbc
     end
 
     # @override
-    def tables
-      @connection.tables(nil, h2_schema)
+    def tables(schema = current_schema)
+      @connection.tables(nil, schema)
     end
 
     # @override
     def columns(table_name, name = nil)
-      @connection.columns_internal(table_name.to_s, nil, h2_schema)
+      schema, table = extract_schema_and_table(table_name.to_s)
+      schema = current_schema if schema.nil?
+      @connection.columns_internal(table, nil, schema || '')
     end
 
     # @override
@@ -183,8 +183,34 @@ module ArJdbc
       change_column_null(table_name, column_name, options[:null], options[:default]) if options.key?(:null)
     end
 
+    # @return [String] the current schema name
     def current_schema
-      execute('CALL SCHEMA()')[0].values[0]
+      @current_schema ||= execute('CALL SCHEMA()', 'SCHEMA')[0].values[0] # PUBLIC (default)
+    end
+
+    # Change the (current) schema to be used for this connection.
+    def set_schema(schema = 'PUBLIC')
+      @current_schema = nil
+      execute "SET SCHEMA #{schema}", 'SCHEMA'
+    end
+    alias_method :current_schema=, :set_schema
+
+    def create_schema(schema)
+      execute "CREATE SCHEMA #{schema}", 'SCHEMA'
+    end
+
+    def drop_schema(schema)
+      @current_schema = nil if current_schema == schema
+      execute "DROP SCHEMA #{schema}", 'SCHEMA'
+    end
+
+    def configure_connection
+      # NOTE: just to support the config[:schema] setting
+      # it's likely better to append this to the JDBC URL :
+      # jdbc:h2:test;SCHEMA=MY_SCHEMA
+      if schema = config[:schema]
+        set_schema(schema) # if schema.uppercase != 'PUBLIC'
+      end
     end
 
     # @override
@@ -292,21 +318,20 @@ module ArJdbc
       end
     end
 
-    def h2_schema
-      @config[:schema] || ''
+    def extract_schema_and_table(name)
+      result = name.scan(/[^".\s]+|"[^"]*"/)[0, 2]
+      result.each { |m| m.gsub!(/(^"|"$)/, '') }
+      result.unshift(nil) if result.size == 1 # schema == nil
+      result # [schema, table]
     end
 
   end
 end
 
 module ActiveRecord::ConnectionAdapters
-
   class H2Adapter < JdbcAdapter
-    include ArJdbc::H2
+    include ::ArJdbc::H2
   end
-
-  class H2Column < JdbcColumn
-    include ::ArJdbc::H2::Column
-  end
-
+  # @private
+  H2Column = ::ArJdbc::H2::Column
 end

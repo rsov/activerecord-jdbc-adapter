@@ -5,16 +5,13 @@ module ArJdbc
 
     if AR42
       require 'active_record/connection_adapters/postgresql/oid'
+      require 'arjdbc/postgresql/base/pgconn'
       require 'arjdbc/postgresql/oid/bytea.rb'
     else
       require 'arjdbc/postgresql/base/oid'
     end
 
     require 'arjdbc/postgresql/base/pgconn'
-
-    def self.unescape_bytea(escaped)
-      String.from_java_bytes Java::OrgPostgresqlUtil::PGbytea.toBytes escaped.to_java_bytes
-    end
 
     # @private
     OID = ::ActiveRecord::ConnectionAdapters::PostgreSQL::OID

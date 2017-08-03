@@ -41,18 +41,12 @@ module ArJdbc
 
       require 'arjdbc/util/serialized_attributes'
       Util::SerializedAttributes.setup /LOB\(|LOB$/i, 'after_save_with_oracle_lob'
-
-      unless ActiveRecord::ConnectionAdapters::AbstractAdapter.
-          instance_methods(false).detect { |m| m.to_s == "prefetch_primary_key?" }
-        require 'arjdbc/jdbc/quoted_primary_key'
-        ActiveRecord::Base.extend ArJdbc::QuotedPrimaryKeyExtension
-      end
     end
+
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::OracleJdbcConnection
 
     # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::OracleJdbcConnection
-    end
+    def self.jdbc_connection_class; JdbcConnection end
 
     # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_column_class
     def jdbc_column_class; ::ActiveRecord::ConnectionAdapters::OracleColumn end
@@ -231,6 +225,7 @@ module ArJdbc
     end
     alias_method :ids_in_list_limit, :in_clause_length
 
+    # @private
     IDENTIFIER_LENGTH = 30
 
     # maximum length of Oracle identifiers is 30
@@ -272,7 +267,7 @@ module ArJdbc
         raise ArgumentError, "New sequence name '#{new_name}_seq' is too long; the limit is #{sequence_name_length} characters"
       end
       execute "RENAME #{quote_table_name(name)} TO #{quote_table_name(new_name)}"
-      execute "RENAME #{quote_table_name("#{name}_seq")} TO #{quote_table_name("#{new_name}_seq")}" rescue nil
+      execute_immediate("RENAME #{quote_table_name("#{name}_seq")} TO #{quote_table_name("#{new_name}_seq")}", '-4043') # IF EXISTS
     end
 
     # @override
@@ -282,8 +277,16 @@ module ArJdbc
       seq_name = options.key?(:sequence_name) ? # pass nil/false - no sequence
         options[:sequence_name] : default_sequence_name(name)
       return outcome unless seq_name
-      execute_quietly "DROP SEQUENCE #{quote_table_name(seq_name)}"
+      execute_immediate("DROP SEQUENCE #{quote_table_name(seq_name)}", '-2289') # IF EXISTS
     end
+
+    # @private
+    def execute_immediate(execute, sqlcode)
+      execute "BEGIN EXECUTE IMMEDIATE '#{execute}';" <<
+        " EXCEPTION WHEN OTHERS THEN IF SQLCODE != #{sqlcode} THEN RAISE; END IF;" <<
+        " END;"
+    end
+    private :execute_immediate
 
     # @override
     def type_to_sql(type, limit = nil, precision = nil, scale = nil)
@@ -925,9 +928,13 @@ end
 require 'arjdbc/util/quoted_cache'
 
 module ActiveRecord::ConnectionAdapters
+  class OracleColumn < JdbcColumn
+    include ::ArJdbc::Oracle::ColumnMethods
+    # def returning_id?; @returning_id ||= nil end
+    # def returning_id!; @returning_id = true end
+  end
 
   remove_const(:OracleAdapter) if const_defined?(:OracleAdapter)
-
   class OracleAdapter < JdbcAdapter
     include ::ArJdbc::Oracle
     include ::ArJdbc::Util::QuotedCache
@@ -949,14 +956,13 @@ module ActiveRecord::ConnectionAdapters
         self.class.type_cast_config_to_boolean(config[:insert_returning]) : nil
     end
 
+    # @private Temporary until ArJdbc::Oracle::Column is changed.
+    Column = OracleColumn
   end
-
-  class OracleColumn < JdbcColumn
-    include ::ArJdbc::Oracle::Column
-
-    # def returning_id?; @returning_id ||= nil end
-    # def returning_id!; @returning_id = true end
-
-  end
-
 end
+
+#module ArJdbc
+#  module Oracle
+#    Column = ::ActiveRecord::ConnectionAdapters::OracleColumn
+#  end
+#end

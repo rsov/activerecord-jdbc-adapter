@@ -5,19 +5,15 @@ ArJdbc::ConnectionMethods.module_eval do
 
     return jndi_connection(config) if jndi_config?(config)
 
-    begin
-      require 'jdbc/postgres'
-      ::Jdbc::Postgres.load_driver(:require) if defined?(::Jdbc::Postgres.load_driver)
-    rescue LoadError # assuming driver.jar is on the class-path
-    end
-    config[:driver] ||= defined?(::Jdbc::Postgres.driver_name) ? ::Jdbc::Postgres.driver_name : 'org.postgresql.Driver'
+    driver = config[:driver] ||= 'org.postgresql.Driver'
+    ArJdbc.load_driver(:Postgres) if driver.start_with?('org.postgresql.') && config[:load_driver] != false
 
     host = config[:host] ||= ( config[:hostaddr] || ENV['PGHOST'] || 'localhost' )
     port = config[:port] ||= ( ENV['PGPORT'] || 5432 )
     database = config[:database] || config[:dbname] || ENV['PGDATABASE']
 
     config[:url] ||= "jdbc:postgresql://#{host}:#{port}/#{database}"
-    config[:url] << config[:pg_params] if config[:pg_params] # should go away
+    config[:url] << config[:pg_params] if config[:pg_params]
 
     config[:username] ||= ( config[:user] || ENV['PGUSER'] || ENV_JAVA['user.name'] )
     config[:password] ||= ENV['PGPASSWORD'] unless config.key?(:password)

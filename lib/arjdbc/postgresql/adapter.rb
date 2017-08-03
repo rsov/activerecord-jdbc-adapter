@@ -17,6 +17,7 @@ module ArJdbc
     require 'arjdbc/postgresql/column'
     require 'arjdbc/postgresql/explain_support'
     require 'arjdbc/postgresql/schema_creation' # AR 4.x
+
     # @private
     IndexDefinition = ::ActiveRecord::ConnectionAdapters::IndexDefinition
 
@@ -26,24 +27,11 @@ module ArJdbc
     # @private
     Type = ::ActiveRecord::Type if AR42
 
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::PostgreSQLJdbcConnection
+
+    # @deprecated
     # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::PostgreSQLJdbcConnection
-    end
-
-    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_column_class
-    def jdbc_column_class; ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn end
-
-    # @private
-    def init_connection(jdbc_connection)
-      meta = jdbc_connection.meta_data
-      if meta.driver_version.index('JDBC3') # e.g. 'PostgreSQL 9.2 JDBC4 (build 1002)'
-        config[:connection_alive_sql] ||= 'SELECT 1'
-      else
-        # NOTE: since the loaded Java driver class can't change :
-        PostgreSQL.send(:remove_method, :init_connection) rescue nil
-      end
-    end
+    def self.jdbc_connection_class; JdbcConnection end
 
     # @see ActiveRecord::ConnectionAdapters::Jdbc::ArelSupport
     def self.arel_visitor_type(config = nil)
@@ -189,12 +177,12 @@ module ArJdbc
       when Array
         case column.sql_type
         when 'point'
-          jdbc_column_class.point_to_string(value)
+          Column.point_to_string(value)
         when 'json', 'jsonb'
-          jdbc_column_class.json_to_string(value)
+          Column.json_to_string(value)
         else
           return super(value, column) unless column.array?
-          jdbc_column_class.array_to_string(value, column, self)
+          Column.array_to_string(value, column, self)
         end
       when NilClass
         if column.array? && array_member
@@ -207,17 +195,17 @@ module ArJdbc
       when Hash
         case column.sql_type
         when 'hstore'
-          jdbc_column_class.hstore_to_string(value, array_member)
+          Column.hstore_to_string(value, array_member)
         when 'json', 'jsonb'
-          jdbc_column_class.json_to_string(value)
+          Column.json_to_string(value)
         else super(value, column)
         end
       when IPAddr
         return super unless column.sql_type == 'inet' || column.sql_type == 'cidr'
-        jdbc_column_class.cidr_to_string(value)
+        Column.cidr_to_string(value)
       when Range
         return super(value, column) unless /range$/ =~ column.sql_type
-        jdbc_column_class.range_to_string(value)
+        Column.range_to_string(value)
       else
         super(value, column)
       end
@@ -311,38 +299,11 @@ module ArJdbc
 
     # Enable standard-conforming strings if available.
     def set_standard_conforming_strings
-      self.standard_conforming_strings=(true)
-    end
-
-    # Enable standard-conforming strings if available.
-    def standard_conforming_strings=(enable)
-      client_min_messages = self.client_min_messages
-      begin
-        self.client_min_messages = 'panic'
-        value = enable ? "on" : "off"
-        execute("SET standard_conforming_strings = #{value}", 'SCHEMA')
-        @standard_conforming_strings = ( value == "on" )
-      rescue
-        @standard_conforming_strings = :unsupported
-      ensure
-        self.client_min_messages = client_min_messages
+      if postgresql_version >= 80200 # N/A (or read-only in PG 8.1)
+        self.standard_conforming_strings=(true)
       end
-    end
-
-    def standard_conforming_strings?
-      if @standard_conforming_strings.nil?
-        client_min_messages = self.client_min_messages
-        begin
-          self.client_min_messages = 'panic'
-          value = select_one('SHOW standard_conforming_strings', 'SCHEMA')['standard_conforming_strings']
-          @standard_conforming_strings = ( value == "on" )
-        rescue
-          @standard_conforming_strings = :unsupported
-        ensure
-          self.client_min_messages = client_min_messages
-        end
-      end
-      @standard_conforming_strings == true # return false if :unsupported
+      # AR 4.2 no longer does the hustle since its claiming PG >= 8.2
+      # ... execute('SET standard_conforming_strings = on', 'SCHEMA')
     end
 
     # Does PostgreSQL support migrations?
@@ -353,12 +314,6 @@ module ArJdbc
     # Does PostgreSQL support finding primary key on non-Active Record tables?
     def supports_primary_key?
       true
-    end
-
-    # Does PostgreSQL support standard conforming strings?
-    def supports_standard_conforming_strings?
-      standard_conforming_strings?
-      @standard_conforming_strings != :unsupported
     end
 
     def supports_hex_escaped_bytea?
@@ -389,24 +344,52 @@ module ArJdbc
     # @override
     def supports_views?; true end
 
-    # NOTE: handled by JdbcAdapter we override only to have save-point in logs :
+    # NOTE: handled by JdbcAdapter only to have statements in logs :
+
+    # @override
+    def begin_db_transaction
+      # PG driver doesn't really do anything on setAutoCommit(false)
+      # except for commit-ing a previous pending transaction if any
+      log('/* BEGIN */') { @connection.begin }
+    end
+
+    # @override
+    def commit_db_transaction
+      log('COMMIT') { @connection.commit }
+    end
+
+    # @override
+    def rollback_db_transaction
+      log('ROLLBACK') { @connection.rollback }
+    end
+
+    # Starts a database transaction.
+    # @param isolation the transaction isolation to use
+    # @since 1.3.0
+    # @override on **AR-4.0**
+    def begin_isolated_db_transaction(isolation)
+      name = isolation.to_s.upcase; name.sub!('_', ' ')
+      log("/* BEGIN */; SET TRANSACTION ISOLATION LEVEL #{name}") do
+        @connection.begin(isolation)
+      end
+    end
 
     # @override
     def supports_savepoints?; true end
 
     # @override
     def create_savepoint(name = current_savepoint_name(true))
-      log("SAVEPOINT #{name}", 'Savepoint') { super }
+      log("SAVEPOINT #{name}") { @connection.create_savepoint(name) }
     end
 
     # @override
     def rollback_to_savepoint(name = current_savepoint_name(true))
-      log("ROLLBACK TO SAVEPOINT #{name}", 'Savepoint') { super }
+      log("ROLLBACK TO SAVEPOINT #{name}") { @connection.rollback_savepoint(name) }
     end
 
     # @override
     def release_savepoint(name = current_savepoint_name(false))
-      log("RELEASE SAVEPOINT #{name}", 'Savepoint') { super }
+      log("RELEASE SAVEPOINT #{name}") { @connection.release_savepoint(name) }
     end
 
     def supports_extensions?
@@ -763,34 +746,6 @@ module ArJdbc
       select('SELECT nspname FROM pg_namespace').map { |row| row["nspname"] }
     end
 
-    # @deprecated no longer used - handled with (AR built-in) Rake tasks
-    def structure_dump
-      database = @config[:database]
-      if database.nil?
-        if @config[:url] =~ /\/([^\/]*)$/
-          database = $1
-        else
-          raise "Could not figure out what database this url is for #{@config["url"]}"
-        end
-      end
-
-      ENV['PGHOST']     = @config[:host] if @config[:host]
-      ENV['PGPORT']     = @config[:port].to_s if @config[:port]
-      ENV['PGPASSWORD'] = @config[:password].to_s if @config[:password]
-      search_path = "--schema=#{@config[:schema_search_path]}" if @config[:schema_search_path]
-
-      @connection.connection.close
-      begin
-        definition = `pg_dump -i -U "#{@config[:username]}" -s -x -O #{search_path} #{database}`
-        raise "Error dumping database" if $?.exitstatus == 1
-
-        # need to patch away any references to SQL_ASCII as it breaks the JDBC driver
-        definition.gsub(/SQL_ASCII/, 'UNICODE')
-      ensure
-        reconnect!
-      end
-    end
-
     # Returns the current client message level.
     def client_min_messages
       return nil if redshift? # not supported on Redshift
@@ -807,7 +762,7 @@ module ArJdbc
 
     # Gets the maximum number columns postgres has, default 32
     def multi_column_index_limit
-      defined?(@multi_column_index_limit) && @multi_column_index_limit || 32
+      @multi_column_index_limit ||= 32
     end
 
     # Sets the maximum number columns postgres has, default 32
@@ -881,37 +836,37 @@ module ArJdbc
         return "E'#{escape_bytea(value)}'::bytea" if column.type == :binary
         return "xml '#{quote_string(value)}'" if column.type == :xml
         sql_type = column.respond_to?(:sql_type) && column.sql_type
-        sql_type && sql_type[0, 3] == 'bit' ? quote_bit(value) : super
+        sql_type && sql_type.start_with?('bit') ? quote_bit(value) : super
       when Array
         if AR40 && column.array? # will be always falsy in AR < 4.0
-          "'#{jdbc_column_class.array_to_string(value, column, self).gsub(/'/, "''")}'"
+          "'#{Column.array_to_string(value, column, self).gsub(/'/, "''")}'"
         elsif column.type == :json # only in AR-4.0
-          super(jdbc_column_class.json_to_string(value), column)
+          super(Column.json_to_string(value), column)
         elsif column.type == :jsonb # only in AR-4.0
-          super(jdbc_column_class.json_to_string(value), column)
+          super(Column.json_to_string(value), column)
         elsif column.type == :point # only in AR-4.0
-          super(jdbc_column_class.point_to_string(value), column)
+          super(Column.point_to_string(value), column)
         else super
         end
       when Hash
         if column.type == :hstore # only in AR-4.0
-          super(jdbc_column_class.hstore_to_string(value), column)
+          super(Column.hstore_to_string(value), column)
         elsif column.type == :json # only in AR-4.0
-          super(jdbc_column_class.json_to_string(value), column)
+          super(Column.json_to_string(value), column)
         elsif column.type == :jsonb # only in AR-4.0
-          super(jdbc_column_class.json_to_string(value), column)
+          super(Column.json_to_string(value), column)
         else super
         end
       when Range
         sql_type = column.respond_to?(:sql_type) && column.sql_type
-        if sql_type && sql_type[-5, 5] == 'range' && AR40
-          escaped = quote_string(jdbc_column_class.range_to_string(value))
+        if sql_type && sql_type.end_with?('range') && AR40
+          escaped = quote_string(Column.range_to_string(value))
           "'#{escaped}'::#{sql_type}"
         else super
         end
       when IPAddr
         if column.type == :inet || column.type == :cidr # only in AR-4.0
-          super(jdbc_column_class.cidr_to_string(value), column)
+          super(Column.cidr_to_string(value), column)
         else super
         end
       else
@@ -943,17 +898,6 @@ module ArJdbc
       end
     end if AR42
     private :_quote if AR42
-
-    # Quotes a string, escaping any ' (single quote) and \ (backslash) chars.
-    # @return [String]
-    # @override
-    def quote_string(string)
-      quoted = string.gsub("'", "''")
-      unless standard_conforming_strings?
-        quoted.gsub!(/\\/, '\&\&')
-      end
-      quoted
-    end
 
     # @return [String]
     def quote_bit(value)
@@ -1000,11 +944,6 @@ module ArJdbc
     def quote_table_name_for_assignment(table, attr)
       quote_column_name(attr)
     end if AR40
-
-    # @override
-    def quote_column_name(name)
-      %("#{name.to_s.gsub("\"", "\"\"")}")
-    end
 
     # @private
     def quote_default_value(value, column)
@@ -1233,7 +1172,6 @@ module ArJdbc
 
     # Returns the list of all column definitions for a table.
     def columns(table_name, name = nil)
-      column = jdbc_column_class
       column_definitions(table_name).map! do |row|
         # |name, type, default, notnull, oid, fmod|
         name = row[0]; type = row[1]; default = row[2]
@@ -1248,7 +1186,7 @@ module ArJdbc
           default = $1
         end
 
-        column.new(name, default, oid, type, ! notnull, fmod, self)
+        Column.new(name, default, oid, type, ! notnull, fmod, self)
       end
     end
 
@@ -1394,8 +1332,10 @@ module ArJdbc
       result.map! do |row|
         index_name = row[0]
         unique = row[1].is_a?(String) ? row[1] == 't' : row[1] # JDBC gets us a boolean
-        indkey = row[2].is_a?(Java::OrgPostgresqlUtil::PGobject) ? row[2].value : row[2]
-        indkey = indkey.split(" ")
+        # NOTE: this hack should no longer be needed ...
+        # indkey = row[2].is_a?(Java::OrgPostgresqlUtil::PGobject) ? row[2].value : row[2]
+        # indkey = indkey.split(" ")
+        indkey = row[2].split(' ')
         inddef = row[3]
         oid = row[4]
 
@@ -1486,15 +1426,13 @@ require 'arjdbc/util/quoted_cache'
 module ActiveRecord::ConnectionAdapters
 
   remove_const(:PostgreSQLColumn) if const_defined?(:PostgreSQLColumn)
-
   class PostgreSQLColumn < JdbcColumn
-    include ::ArJdbc::PostgreSQL::Column
+    include ::ArJdbc::PostgreSQL::ColumnMethods
   end
 
   # NOTE: seems needed on 4.x due loading of '.../postgresql/oid' which
   # assumes: class PostgreSQLAdapter < AbstractAdapter
   remove_const(:PostgreSQLAdapter) if const_defined?(:PostgreSQLAdapter)
-
   class PostgreSQLAdapter < JdbcAdapter
     include ::ArJdbc::PostgreSQL
     include ::ArJdbc::PostgreSQL::ExplainSupport
@@ -1530,7 +1468,6 @@ module ActiveRecord::ConnectionAdapters
 
     ColumnDefinition = ActiveRecord::ConnectionAdapters::PostgreSQL::ColumnDefinition
 
-    ColumnMethods = ActiveRecord::ConnectionAdapters::PostgreSQL::ColumnMethods
     TableDefinition = ActiveRecord::ConnectionAdapters::PostgreSQL::TableDefinition
 
     def table_definition(*args)
@@ -1552,5 +1489,13 @@ module ActiveRecord::ConnectionAdapters
       PostgreSQLJdbcConnection.raw_hstore_type = true if PostgreSQLJdbcConnection.raw_hstore_type? == nil
     end
 
+    # Column = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
+
+  end
+end
+
+module ArJdbc
+  module PostgreSQL
+    Column = ::ActiveRecord::ConnectionAdapters::PostgreSQLColumn
   end
 end

@@ -6,13 +6,17 @@ module ArJdbc
   module HSQLDB
     include ExplainSupport
 
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::JdbcConnection
+
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn#column_types
     def self.column_selector
-      [ /hsqldb/i, lambda { |config, column| column.extend(Column) } ]
+      [ /hsqldb/i, lambda { |config, column| column.extend(ColumnMethods) } ]
     end
 
+    # @since 1.4.0
+    # @private Internal - mostly due {#column_selector}.
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn
-    module Column
+    module ColumnMethods
 
       private
 
@@ -62,6 +66,12 @@ module ArJdbc
         value
       end
 
+    end
+
+    # HSQLDB's (JDBC) column class
+    # @since 1.4.0
+    class Column < ::ActiveRecord::ConnectionAdapters::JdbcColumn
+      include ColumnMethods
     end
 
     # @see ActiveRecord::ConnectionAdapters::Jdbc::ArelSupport
@@ -238,8 +248,8 @@ module ArJdbc
     end
 
     # @override
-    def remove_index(table_name, options = {})
-      execute "DROP INDEX #{quote_column_name(index_name(table_name, options))}"
+    def remove_index!(table_name, index_name)
+      execute "DROP INDEX #{quote_column_name(index_name)}"
     end
 
     # @override
@@ -288,10 +298,7 @@ module ArJdbc
 end
 
 module ActiveRecord::ConnectionAdapters
-
   class HsqldbAdapter < JdbcAdapter
-    include ArJdbc::HSQLDB
+    include ::ArJdbc::HSQLDB
   end
-
 end
-

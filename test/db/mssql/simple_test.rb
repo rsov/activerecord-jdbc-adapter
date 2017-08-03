@@ -1,9 +1,8 @@
-require 'jdbc_common'
 require 'db/mssql'
+require 'simple'
 
 class MSSQLSimpleTest < Test::Unit::TestCase
   include SimpleTestMethods
-  include ActiveRecord3TestMethods
   include DirtyAttributeTests
 
   include ExplainSupportTestMethods if ar_version("3.1")
@@ -265,6 +264,8 @@ class MSSQLSimpleTest < Test::Unit::TestCase
 
 end
 
+require 'has_many_through_test_methods'
+
 class MSSQLHasManyThroughTest < Test::Unit::TestCase
-  include HasManyThroughMethods
+  include HasManyThroughTestMethods
 end

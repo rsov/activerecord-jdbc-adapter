@@ -1,22 +1,17 @@
-require 'test_helper'
+require 'db/postgres'
 require 'simple'
 require 'custom_select_test_methods'
-require 'has_many_through_test_methods'
 require 'xml_column_test_methods'
-require 'db/postgres'
 
-class PostgresSimpleTest < Test::Unit::TestCase
+class PostgreSQLSimpleTest < Test::Unit::TestCase
   include SimpleTestMethods
-  include ActiveRecord3TestMethods
   include ColumnNameQuotingTests
   include DirtyAttributeTests
-  include XmlColumnTestMethods
-  include CustomSelectTestMethods
 
-  def test_adapter_class_name_equals_native_adapter_class_name
-    classname = connection.class.name[/[^:]*$/]
-    assert_equal 'PostgreSQLAdapter', classname
-  end
+  include CustomSelectTestMethods
+  include XmlColumnTestMethods
+
+  add_ignored_sql '/* BEGIN */' # for DirtyAttributeTests
 
   # @override
   def test_truncate
@@ -191,17 +186,22 @@ class PostgresSimpleTest < Test::Unit::TestCase
     connection.drop_table :my_posts rescue nil
   end
 
-  def test_supports_standard_conforming_string
-    assert([true, false].include?(connection.supports_standard_conforming_strings?))
-  end if defined? JRUBY_VERSION
+  def test_resolves_correct_columns_default
+    assert column = DbType.columns.find { |col| col.name == 'sample_small_decimal' }
+    assert_equal 3.14, column.default
+    assert column = DbType.columns.find { |col| col.name == 'sample_integer_no_limit' }
+    assert_equal 42, column.default
+    assert column = DbType.columns.find { |col| col.name == 'sample_integer_neg_default' }
+    assert_equal -1, column.default
+  end
 
   def test_standard_conforming_string_default_set_on_new_connections
-    c = ActiveRecord::Base.postgresql_connection(POSTGRES_CONFIG)
-    assert_equal true, c.instance_variable_get("@standard_conforming_strings")
+    connection = ActiveRecord::Base.postgresql_connection(POSTGRES_CONFIG)
+    assert_equal true, connection.instance_variable_get("@standard_conforming_strings")
   end if defined? JRUBY_VERSION
 
   def test_default_standard_conforming_string
-    if connection.supports_standard_conforming_strings?
+    if supports_standard_conforming_strings?
       assert_equal true, connection.standard_conforming_strings?
     else
       assert_equal false, connection.standard_conforming_strings?
@@ -209,17 +209,25 @@ class PostgresSimpleTest < Test::Unit::TestCase
   end if defined? JRUBY_VERSION
 
   def test_string_quoting_with_standard_conforming_strings
-    if connection.supports_standard_conforming_strings?
+    prev = connection.standard_conforming_strings?
+    begin
+      connection.standard_conforming_strings = true
       s = "\\m it's \\M"
       assert_equal "'\\m it''s \\M'", connection.quote(s)
+    ensure
+      connection.standard_conforming_strings = prev
     end
   end if defined? JRUBY_VERSION
 
   def test_string_quoting_without_standard_conforming_strings
-    connection.standard_conforming_strings = false
-    s = "\\m it's \\M"
-    assert_equal "'\\\\m it''s \\\\M'", connection.quote(s)
-    connection.standard_conforming_strings = true
+    prev = connection.standard_conforming_strings?
+    begin
+      connection.standard_conforming_strings = false
+      s = "\\m it's \\M"
+      assert_equal "'\\\\m it''s \\\\M'", connection.quote(s)
+    ensure
+      connection.standard_conforming_strings = prev
+    end
   end if defined? JRUBY_VERSION
 
   test 'returns correct visitor type' do
@@ -286,9 +294,16 @@ class PostgresSimpleTest < Test::Unit::TestCase
     assert_equal 'some', connection.type_cast(:some, nil)
   end if ar_version('3.1')
 
+  private
+
+  def supports_standard_conforming_strings?(connection = self.connection)
+    connection.standard_conforming_strings?
+    ! connection.instance_variable_get(:@standard_conforming_strings).nil?
+  end
+
 end
 
-class PostgresTimestampTest < Test::Unit::TestCase
+class PostgreSQLTimestampTest < Test::Unit::TestCase
 
   def self.startup
     super
@@ -379,7 +394,7 @@ class PostgresTimestampTest < Test::Unit::TestCase
 
 end
 
-class PostgresDeserializationTest < Test::Unit::TestCase
+class PostgreSQLDeserializationTest < Test::Unit::TestCase
 
   def self.startup
     DbTypeMigration.up
@@ -397,8 +412,10 @@ class PostgresDeserializationTest < Test::Unit::TestCase
   end
 end
 
-class PostgresHasManyThroughTest < Test::Unit::TestCase
-  include HasManyThroughMethods
+require 'has_many_through_test_methods'
+
+class PostgreSQLHasManyThroughTest < Test::Unit::TestCase
+  include HasManyThroughTestMethods
 end
 
 class PostgresForeignKeyTest < Test::Unit::TestCase

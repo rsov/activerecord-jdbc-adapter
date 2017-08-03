@@ -1,5 +1,7 @@
 source "https://rubygems.org"
 
+# NOTE: appraisal can not handle a `gemspec' declaration !
+
 if version = ENV['AR_VERSION']
   if version.index('/') && ::File.exist?(version)
     gem 'activerecord', :path => version
@@ -24,6 +26,11 @@ if defined?(JRUBY_VERSION) && JRUBY_VERSION < '1.7.0'
 gem 'jruby-openssl', :platform => :jruby
 end
 
+group :default do
+  gem 'jar-dependencies', '>= 0.1.9', :require => nil, :platform => :jruby
+  gem 'ruby-maven', '~> 3.1.1.0.11', :require => nil, :platform => :jruby, :group => :development
+end if ENV['BUILD_EXT_MAVEN'] == 'true'
+
 gem 'rake', '~> 10.4.2', :require => nil
 gem 'appraisal', '~> 0.5.2', :require => nil
 
@@ -33,15 +40,15 @@ gem 'test-unit', '~> 2.5.4', :group => :test
 gem 'test-unit-context', '>= 0.4.0', :group => :test
 gem 'mocha', '~> 0.13.1', :require => nil, :group => :test
 
-gem 'simplecov', :require => nil, :group => :test
+gem 'simplecov', :require => nil, :group => :test if ENV['COVERAGE']
 gem 'bcrypt-ruby', '~> 3.0.0', :require => nil, :group => :test
 #gem 'trinidad_dbpool', :require => nil, :group => :test
 
 group :development do
-  gem 'ruby-debug', :require => nil if ENV['DEBUG']
+  #gem 'ruby-debug', :require => nil if ENV['DEBUG']
   group :doc do
     gem 'yard', :require => nil
-    gem 'yard-method-overrides', :github => 'kares/yard-method-overrides', :require => nil
+    #gem 'yard-method-overrides', :github => 'kares/yard-method-overrides', :require => nil
     gem 'kramdown', :require => nil
   end
 end

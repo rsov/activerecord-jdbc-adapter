@@ -1,6 +1,8 @@
 require 'test_helper'
 
-class PostgresUnitTest < Test::Unit::TestCase
+class PostgreSQLUnitTest < Test::Unit::TestCase
+
+  def self.startup; require 'arjdbc/postgresql' end
 
   test 'create_database (with options)' do
     connection = connection_stub
@@ -14,6 +16,10 @@ class PostgresUnitTest < Test::Unit::TestCase
     connection = connection_stub
     connection.expects(:execute).with "CREATE DATABASE \"mega_development\" ENCODING = 'utf8'"
     connection.create_database 'mega_development'
+  end
+
+  test 'Column works' do
+    assert ArJdbc::PostgreSQL::Column.is_a?(Class)
   end
 
   context 'distinct' do

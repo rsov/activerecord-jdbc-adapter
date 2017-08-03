@@ -15,6 +15,7 @@ build.xml
 nbproject
 .classpath
 .project
+.idea
 *.sqlite
 *.sqlite3
 *.derby
@@ -31,3 +32,4 @@ gemfiles/.bundle/config
 Gemfile.lock
 .idea
 .settings
+lib/arjdbc/jdbc/adapter_java.jar

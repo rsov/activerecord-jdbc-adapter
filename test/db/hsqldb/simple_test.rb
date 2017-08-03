@@ -1,10 +1,9 @@
 require 'db/hsqldb'
 require 'simple'
 
-class HsqldbSimpleTest < Test::Unit::TestCase
+class HSQLDBSimpleTest < Test::Unit::TestCase
   include SimpleTestMethods
   include ExplainSupportTestMethods if ar_version("3.1")
-  include ActiveRecord3TestMethods
   include CustomSelectTestMethods
 
   # @override
@@ -19,11 +18,5 @@ class HsqldbSimpleTest < Test::Unit::TestCase
     skip 'HSQLDB seems to have issues EXPLAIN-ing with binds'
     super
   end if ar_version('3.1')
-
-  test 'returns correct visitor type' do
-    assert_not_nil visitor = connection.instance_variable_get(:@visitor)
-    assert defined? Arel::Visitors::HSQLDB
-    assert_kind_of Arel::Visitors::HSQLDB, visitor
-  end if ar_version('3.0')
 
 end

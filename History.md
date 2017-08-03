@@ -188,7 +188,7 @@
 
 ## 1.3.11 (10/20/14)
 
-- arjdbc: performance improvement - avodinng JRuby's impl iface generation
+- arjdbc: performance improvement - avoiding JRuby's impl iface generation
 - [firebird] Use ampersand literal in limit offset sub to fix FIRST 1/SKIP 1
 - require super call is not needed and causes issues double loading features
 

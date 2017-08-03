@@ -32,7 +32,9 @@ module ActiveRecord::ConnectionAdapters
         def resolve_visitor_type(config)
           raise "missing :adapter in #{config.inspect}" unless adapter = config[:adapter]
 
-          unless visitor_type = RESOLVED_VISITORS[ adapter ]
+          visitor_type = RESOLVED_VISITORS[ adapter ]
+
+          if visitor_type.nil? || adapter == 'jdbc'
             if adapter_spec = config[:adapter_spec]
               if adapter_spec.respond_to?(:arel_visitor_type)
                 visitor_type = adapter_spec.arel_visitor_type(config)
@@ -46,6 +48,12 @@ module ActiveRecord::ConnectionAdapters
               visitor_type = arel_visitor_type(config) # adapter_class' override
             end
 
+            if visitor_type && RESOLVED_VISITORS[ adapter ] # adapter == 'jdbc'
+              if visitor_type != RESOLVED_VISITORS[ adapter ]
+                ArJdbc.warn("overriding visitor for 'adapter: jdbc' (from #{RESOLVED_VISITORS[ adapter ]} to #{visitor_type})")
+              end
+            end
+
             visitor_type ||= ::Arel::Visitors::VISITORS[ arel_visitor_name(adapter_spec) ]
             visitor_type ||= ::Arel::Visitors::ToSql # default (if nothing resolved)
 
@@ -56,6 +64,14 @@ module ActiveRecord::ConnectionAdapters
 
           visitor_type
         end
+
+        # @private
+        def clean_visitor_type(adapter)
+          RESOLVED_VISITORS.to_java.synchronized do
+            RESOLVED_VISITORS.delete(adapter); ::Arel::Visitors::VISITORS.delete(adapter)
+          end
+        end
+        private :clean_visitor_type
 
         # @note called from `ActiveRecord::ConnectionAdapters::ConnectionPool.checkout` (up till AR-3.2)
         # @override

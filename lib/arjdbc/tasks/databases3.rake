@@ -67,6 +67,10 @@ namespace :db do
       _rails_create_database adapt_jdbc_config(config)
     when /postgresql|sqlite/
       _rails_create_database adapt_jdbc_config(config)
+    when /mariadb/ # fake mariadb as mysql for Rails
+      config = config.update('adapter' => 'mysql')
+      config['driver'] ||= 'org.mariadb.jdbc.Driver'
+      _rails_create_database adapt_jdbc_config(config)
     else
       ArJdbc::Tasks.create(config)
     end
@@ -75,6 +79,10 @@ namespace :db do
   def drop_database(config)
     case config['adapter']
     when /mysql|postgresql|sqlite/
+      _rails_drop_database adapt_jdbc_config(config)
+    when /mariadb/ # fake mariadb as mysql for Rails
+      config = config.update('adapter' => 'mysql')
+      config['driver'] ||= 'org.mariadb.jdbc.Driver'
       _rails_drop_database adapt_jdbc_config(config)
     else
       ArJdbc::Tasks.drop(config)
@@ -96,9 +104,15 @@ namespace :db do
       filename = structure_sql
 
       case config['adapter']
-      when /mysql/
-        ActiveRecord::Base.establish_connection(config)
-        File.open(filename, 'w:utf-8') { |f| f << ActiveRecord::Base.connection.structure_dump }
+      when /mysql|mariadb/
+        args = _prepare_mysql_options('mysqldump', config)
+        args.concat(["--result-file", "#{filename}"])
+        args.concat(["--no-data"])
+        args.concat(["#{config['database']}"])
+        unless Kernel.system(*args)
+          puts "Could not dump the database structure. "\
+          "Make sure `mysqldump` is in your PATH and check the command output for warnings."
+        end
       when /postgresql/
         ActiveRecord::Base.establish_connection(config)
 
@@ -134,12 +148,11 @@ namespace :db do
       filename = structure_sql
 
       case config['adapter']
-      when /mysql/
-        ActiveRecord::Base.establish_connection(config)
-        ActiveRecord::Base.connection.execute('SET foreign_key_checks = 0')
-        IO.read(filename).split("\n\n").each do |table|
-          ActiveRecord::Base.connection.execute(table)
-        end
+      when /mysql|mariadb/
+        args = _prepare_mysql_options('mysql', config)
+        args.concat(['--execute', %{SET FOREIGN_KEY_CHECKS = 0; SOURCE #{filename}; SET FOREIGN_KEY_CHECKS = 1}])
+        args.concat(["--database", "#{config['database']}"])
+        Kernel.system(*args)
       when /postgresql/
         ENV['PGHOST'] = config['host'] if config['host']
         ENV['PGPORT'] = config['port'].to_s if config['port']
@@ -166,6 +179,17 @@ namespace :db do
       end
     end
 
+    def _prepare_mysql_options(command, config)
+      args = [ command ]
+      args.concat(['--user', config['username']]) if config['username']
+      args << "--password=#{config['password']}" if config['password']
+      args.concat(['--default-character-set', config['encoding']]) if config['encoding']
+      config.slice('host', 'port', 'socket').each do |k, v|
+        args.concat([ "--#{k}", v.to_s ]) if v
+      end
+      args
+    end
+
   end
 
   namespace :test do
@@ -188,7 +212,7 @@ namespace :db do
     redefine_task :purge do
       config = ActiveRecord::Base.configurations['test']
       case config['adapter']
-      when /mysql/
+      when /mysql|mariadb/
         ActiveRecord::Base.establish_connection(:test)
         options = mysql_creation_options(config) rescue config
         ActiveRecord::Base.connection.recreate_database(config['database'], options)

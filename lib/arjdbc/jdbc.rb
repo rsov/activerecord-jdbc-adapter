@@ -27,11 +27,14 @@ module ArJdbc
     end
 
     def warn(message, once = nil)
-      super(message) || true if warn?(message, once)
+      super("WARNING: #{message}") || true if warn?(message, once)
     end
 
     def deprecate(message, once = nil) # adds a "DEPRECATION WARNING: " prefix
-      ::ActiveSupport::Deprecation.warn(message, caller) || true if warn?(message, once)
+      if warn?(message, once)
+        callstack = once.is_a?(Integer) ? caller(once) : caller
+        ::ActiveSupport::Deprecation.warn(message, callstack) || true
+      end
     end
 
     private

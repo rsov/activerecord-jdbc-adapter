@@ -3,11 +3,12 @@ module ArJdbc
 
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn#column_types
     def self.column_selector
-      [ /sqlserver|tds|Microsoft SQL/i, lambda { |config, column| column.extend(Column) } ]
+      [ /sqlserver|tds|Microsoft SQL/i, lambda { |config, column| column.extend(ColumnMethods) } ]
     end
 
+    # @private
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn
-    module Column
+    module ColumnMethods
 
       def self.included(base)
         # NOTE: assumes a standalone MSSQLColumn class
@@ -114,41 +115,6 @@ module ArJdbc
         value.to_s.sub(/\A\([\(\']?/, "").sub(/[\'\)]?\)\Z/, "")
       end
 
-      # @deprecated no longer used
-      def cast_to_time(value)
-        return value if value.is_a?(Time)
-        DateTime.parse(value).to_time rescue nil
-      end
-
-      # @deprecated no longer used
-      def cast_to_date(value)
-        return value if value.is_a?(Date)
-        return Date.parse(value) rescue nil
-      end
-
-      # @deprecated no longer used
-      def cast_to_datetime(value)
-        if value.is_a?(Time)
-          if value.year != 0 and value.month != 0 and value.day != 0
-            return value
-          else
-            return Time.mktime(2000, 1, 1, value.hour, value.min, value.sec) rescue nil
-          end
-        end
-        if value.is_a?(DateTime)
-          begin
-            # Attempt to convert back to a Time, but it could fail for dates significantly in the past/future.
-            return Time.mktime(value.year, value.mon, value.day, value.hour, value.min, value.sec)
-          rescue ArgumentError
-            return value
-          end
-        end
-
-        return cast_to_time(value) if value.is_a?(Date) or value.is_a?(String) rescue nil
-
-        return value.is_a?(Date) ? value : nil
-      end
-
       module Cast
 
         def string_to_date(value)
@@ -196,5 +162,14 @@ module ArJdbc
       end
 
     end
+
+    def self.const_missing(name)
+      if name.to_sym == :Column
+        ArJdbc.deprecate("#{self.name}::Column will change to refer to the actual column class, please use ColumnMethods instead", :once)
+        return ColumnMethods
+      end
+      super
+    end
+
   end
 end

@@ -29,18 +29,24 @@ import static arjdbc.util.QuotingUtils.BYTES_0;
 import static arjdbc.util.QuotingUtils.BYTES_1;
 import static arjdbc.util.QuotingUtils.quoteSingleQuotesWithFallback;
 
+import org.jruby.Ruby;
 import org.jruby.RubyModule;
 import org.jruby.RubyString;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 
+@org.jruby.anno.JRubyModule(name = "ArJdbc::HSQLDB")
 public class HSQLDBModule {
 
     public static RubyModule load(final RubyModule arJdbc) {
         RubyModule hsqldb = arJdbc.defineModuleUnder("HSQLDB");
         hsqldb.defineAnnotatedMethods( HSQLDBModule.class );
         return hsqldb;
+    }
+
+    public static RubyModule load(final Ruby runtime) {
+        return load( arjdbc.ArJdbcModule.get(runtime) );
     }
 
     @JRubyMethod(name = "quote_string", required = 1, frame = false)
@@ -55,14 +61,14 @@ public class HSQLDBModule {
     public static IRubyObject quoted_true(
             final ThreadContext context,
             final IRubyObject self) {
-        return RubyString.newString(context.getRuntime(), BYTES_1);
+        return RubyString.newString(context.runtime, BYTES_1);
     }
 
     @JRubyMethod(name = "quoted_false", required = 0, frame = false)
     public static IRubyObject quoted_false(
             final ThreadContext context,
             final IRubyObject self) {
-        return RubyString.newString(context.getRuntime(), BYTES_0);
+        return RubyString.newString(context.runtime, BYTES_0);
     }
 
 }

@@ -1,5 +1,5 @@
 /***** BEGIN LICENSE BLOCK *****
- * Copyright (c) 2012-2013 Karol Bucek <self@kares.org>
+ * Copyright (c) 2012-2015 Karol Bucek <self@kares.org>
  * Copyright (c) 2006-2010 Nick Sieger <nick@nicksieger.com>
  * Copyright (c) 2006-2007 Ola Bini <ola.bini@gmail.com>
  * Copyright (c) 2008-2009 Thomas E Enebo <enebo@acm.org>
@@ -27,16 +27,14 @@ package arjdbc.postgresql;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.lang.reflect.InvocationTargetException;
 import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Timestamp;
 import java.sql.Types;
-import java.util.Map;
-import java.util.UUID;
 
 import org.jruby.Ruby;
 import org.jruby.RubyArray;
@@ -44,55 +42,92 @@ import org.jruby.RubyBoolean;
 import org.jruby.RubyClass;
 import org.jruby.RubyFixnum;
 import org.jruby.RubyFloat;
-import org.jruby.RubyHash;
 import org.jruby.RubyIO;
 import org.jruby.RubyString;
 import org.jruby.anno.JRubyMethod;
-import org.jruby.javasupport.JavaUtil;
 import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
 import org.jruby.util.ByteList;
+import org.jruby.util.SafePropertyAccessor;
 
-import org.postgresql.PGConnection;
-import org.postgresql.PGStatement;
-import org.postgresql.core.BaseConnection;
-import org.postgresql.jdbc4.Jdbc4Array;
-import org.postgresql.util.PGInterval;
-import org.postgresql.util.PGobject;
+import arjdbc.jdbc.DriverWrapper;
+import arjdbc.util.DateTimeUtils;
 
 /**
  *
  * @author enebo
  */
+@org.jruby.anno.JRubyClass(name = "ActiveRecord::ConnectionAdapters::PostgreSQLJdbcConnection")
 public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection {
     private static final long serialVersionUID = 7235537759545717760L;
 
-    protected PostgreSQLRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
+    public PostgreSQLRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
         super(runtime, metaClass);
     }
 
     public static RubyClass createPostgreSQLJdbcConnectionClass(Ruby runtime, RubyClass jdbcConnection) {
         final RubyClass clazz = getConnectionAdapters(runtime).
-            defineClassUnder("PostgreSQLJdbcConnection", jdbcConnection, POSTGRESQL_JDBCCONNECTION_ALLOCATOR);
+            defineClassUnder("PostgreSQLJdbcConnection", jdbcConnection, ALLOCATOR);
         clazz.defineAnnotatedMethods(PostgreSQLRubyJdbcConnection.class);
-        getConnectionAdapters(runtime).setConstant("PostgresJdbcConnection", clazz); // backwards-compat
         return clazz;
     }
 
-    private static ObjectAllocator POSTGRESQL_JDBCCONNECTION_ALLOCATOR = new ObjectAllocator() {
+    public static RubyClass load(final Ruby runtime) {
+        RubyClass jdbcConnection = getJdbcConnection(runtime);
+        return createPostgreSQLJdbcConnectionClass(runtime, jdbcConnection);
+    }
+
+    protected static ObjectAllocator ALLOCATOR = new ObjectAllocator() {
         public IRubyObject allocate(Ruby runtime, RubyClass klass) {
             return new PostgreSQLRubyJdbcConnection(runtime, klass);
         }
     };
 
+    @Override
+    protected DriverWrapper newDriverWrapper(final ThreadContext context, final String driver) {
+        DriverWrapper driverWrapper = super.newDriverWrapper(context, driver);
+
+        final java.sql.Driver jdbcDriver = driverWrapper.getDriverInstance();
+        if ( jdbcDriver.getClass().getName().startsWith("org.postgresql.") ) {
+            try { // public static String getVersion()
+                final String version = (String) // "PostgreSQL 9.2 JDBC4 (build 1002)"
+                    jdbcDriver.getClass().getMethod("getVersion").invoke(null);
+                if ( version != null && version.indexOf("JDBC3") >= 0 ) {
+                    // config[:connection_alive_sql] ||= 'SELECT 1'
+                    setConfigValueIfNotSet(context, "connection_alive_sql", context.runtime.newString("SELECT 1"));
+                }
+            }
+            catch (NoSuchMethodException e) { }
+            catch (SecurityException e) { }
+            catch (IllegalAccessException e) { }
+            catch (InvocationTargetException e) { }
+        }
+
+        return driverWrapper;
+    }
+
+    protected final IRubyObject beginTransaction(final ThreadContext context, final Connection connection,
+        final IRubyObject isolation) throws SQLException {
+        // NOTE: only reversed order - just to ~ match how Rails does it :
+        /* if ( connection.getAutoCommit() ) */ connection.setAutoCommit(false);
+        if ( isolation != null ) {
+            setTransactionIsolation(context, connection, isolation);
+        }
+        return context.nil;
+    }
+
+    final DriverImplementation driverImplementation = new PGDriverImplementation(); // currently no other supported
+
+    DriverImplementation driverImplementation() { return driverImplementation; }
+
     // enables testing if the bug is fixed (please run our test-suite)
     // using `rake test_postgresql JRUBY_OPTS="-J-Darjdbc.postgresql.generated_keys=true"`
     protected static final boolean generatedKeys;
     static {
-        String genKeys = System.getProperty("arjdbc.postgresql.generated_keys");
+        String genKeys = SafePropertyAccessor.getProperty("arjdbc.postgresql.generated_keys");
         if ( genKeys == null ) { // @deprecated system property name :
-            genKeys = System.getProperty("arjdbc.postgresql.generated.keys");
+            genKeys = SafePropertyAccessor.getProperty("arjdbc.postgresql.generated.keys");
         }
         generatedKeys = Boolean.parseBoolean(genKeys);
     }
@@ -117,34 +152,20 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
     // storesUpperCaseIdentifiers() return false;
 
     @Override
-    protected String caseConvertIdentifierForRails(final Connection connection, final String value)
+    protected final String caseConvertIdentifierForRails(final Connection connection, final String value)
         throws SQLException {
         return value;
     }
 
     @Override
-    protected String caseConvertIdentifierForJdbc(final Connection connection, final String value)
+    protected final String caseConvertIdentifierForJdbc(final Connection connection, final String value)
         throws SQLException {
         return value;
     }
 
     @Override
-    protected Connection newConnection() throws SQLException {
-        final Connection connection = getConnectionFactory().newConnection();
-        final PGConnection pgConnection;
-        if ( connection instanceof PGConnection ) {
-            pgConnection = (PGConnection) connection;
-        }
-        else {
-            pgConnection = connection.unwrap(PGConnection.class);
-        }
-        pgConnection.addDataType("daterange", DateRangeType.class);
-        pgConnection.addDataType("tsrange",   TsRangeType.class);
-        pgConnection.addDataType("tstzrange", TstzRangeType.class);
-        pgConnection.addDataType("int4range", Int4RangeType.class);
-        pgConnection.addDataType("int8range", Int8RangeType.class);
-        pgConnection.addDataType("numrange",  NumRangeType.class);
-        return connection;
+    protected final Connection newConnection() throws SQLException {
+        return driverImplementation().newConnection( getConnectionFactory().newConnection() );
     }
 
     @Override // due statement.setNull(index, Types.BLOB) not working :
@@ -193,68 +214,23 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
         final int index, IRubyObject value,
         final IRubyObject column, final int type) throws SQLException {
 
-        if ( value instanceof RubyFloat ) {
-            final double _value = ( (RubyFloat) value ).getValue();
-            if ( Double.isInfinite(_value) ) {
-                final Timestamp timestamp;
-                if ( _value < 0 ) {
-                    timestamp = new Timestamp(PGStatement.DATE_NEGATIVE_INFINITY);
-                }
-                else {
-                    timestamp = new Timestamp(PGStatement.DATE_POSITIVE_INFINITY);
-                }
-                statement.setTimestamp( index, timestamp );
-                return;
-            }
+        if ( ! driverImplementation().setTimestampParameter(context, connection, statement, index, value, column, type) ) {
+            super.setTimestampParameter(context, connection, statement, index, value, column, type);
         }
-
-        super.setTimestampParameter(context, connection, statement, index, value, column, type);
     }
-
-    private static final ByteList INTERVAL =
-        new ByteList( new byte[] { 'i','n','t','e','r','v','a','l' }, false );
-
-    private static final ByteList ARRAY_END = new ByteList( new byte[] { '[',']' }, false );
 
     @Override
     protected void setStringParameter(final ThreadContext context,
         final Connection connection, final PreparedStatement statement,
         final int index, final IRubyObject value,
         final IRubyObject column, final int type) throws SQLException {
-        final RubyString sqlType;
-        if ( column != null && ! column.isNil() ) {
-            sqlType = (RubyString) column.callMethod(context, "sql_type");
-        }
-        else {
-            sqlType = null;
-        }
 
-        if ( value.isNil() ) {
-            if ( rawArrayType == Boolean.TRUE ) { // array's type is :string
-                if ( sqlType != null && sqlType.getByteList().endsWith( ARRAY_END ) ) {
-                    statement.setNull(index, Types.ARRAY); return;
-                }
-                statement.setNull(index, type); return;
-            }
-            statement.setNull(index, Types.VARCHAR);
-        }
-        else {
-            final String valueStr = value.asString().toString();
-            if ( sqlType != null ) {
-                if ( rawArrayType == Boolean.TRUE && sqlType.getByteList().endsWith( ARRAY_END ) ) {
-                    final int oid = oid(context, column);
-                    final Array valueArr = new Jdbc4Array(connection.unwrap(BaseConnection.class), oid, valueStr);
-                    statement.setArray(index, valueArr); return;
-                }
-                if ( sqlType.getByteList().startsWith( INTERVAL ) ) {
-                    statement.setObject( index, new PGInterval( valueStr ) ); return;
-                }
-            }
-            statement.setString( index, valueStr );
+        if ( ! driverImplementation().setStringParameter(context, connection, statement, index, value, column, type) ) {
+            super.setStringParameter(context, connection, statement, index, value, column, type);
         }
     }
 
-    private static int oid(final ThreadContext context, final IRubyObject column) {
+    static int oid(final ThreadContext context, final IRubyObject column) {
         // our column convention :
         IRubyObject oid = column.getInstanceVariables().getInstanceVariable("@oid");
         if ( oid == null || oid.isNil() ) { // only for user instantiated Column
@@ -269,163 +245,9 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
         final int index, Object value,
         final IRubyObject column, final int type) throws SQLException {
 
-        final String columnType = column.callMethod(context, "type").asJavaString();
-
-        if ( columnType == (Object) "uuid" ) {
-            setUUIDParameter(statement, index, value);
-            return;
+        if ( ! driverImplementation().setObjectParameter(context, connection, statement, index, value, column, type) ) {
+            super.setObjectParameter(context, connection, statement, index, value, column, type);
         }
-
-        if ( columnType == (Object) "json" ) {
-            setJsonParameter(context, statement, index, value, column);
-            return;
-        }
-
-        if ( columnType == (Object) "tsvector" ) {
-            setTsVectorParameter(statement, index, value);
-            return;
-        }
-
-        if ( columnType == (Object) "cidr" || columnType == (Object) "inet"
-                || columnType == (Object) "macaddr" ) {
-            setAddressParameter(context, statement, index, value, column, columnType);
-            return;
-        }
-
-        if ( columnType != null && columnType.endsWith("range") ) {
-            setRangeParameter(context, statement, index, value, column, columnType);
-            return;
-        }
-
-        super.setObjectParameter(context, connection, statement, index, value, column, type);
-    }
-
-    private void setUUIDParameter(
-        final PreparedStatement statement, final int index,
-        Object value) throws SQLException {
-
-        if ( value instanceof IRubyObject ) {
-            final IRubyObject rubyValue = (IRubyObject) value;
-            if ( rubyValue.isNil() ) {
-                statement.setNull(index, Types.OTHER); return;
-            }
-        }
-        else if ( value == null ) {
-            statement.setNull(index, Types.OTHER); return;
-        }
-
-        final Object uuid = UUID.fromString( value.toString() );
-        statement.setObject(index, uuid);
-    }
-
-    private void setJsonParameter(final ThreadContext context,
-        final PreparedStatement statement, final int index,
-        Object value, final IRubyObject column) throws SQLException {
-
-        if ( value instanceof IRubyObject ) {
-            final IRubyObject rubyValue = (IRubyObject) value;
-            if ( rubyValue.isNil() ) {
-                statement.setNull(index, Types.OTHER); return;
-            }
-            if (!isAr42(column)) { // Value has already been cast for AR42
-                value = column.getMetaClass().callMethod(context, "json_to_string", rubyValue);
-            }
-        }
-        else if ( value == null ) {
-            statement.setNull(index, Types.OTHER); return;
-        }
-
-        final PGobject pgJson = new PGobject();
-        pgJson.setType("json");
-        pgJson.setValue(value.toString());
-        statement.setObject(index, pgJson);
-    }
-
-    private void setTsVectorParameter(
-        final PreparedStatement statement, final int index,
-        Object value) throws SQLException {
-
-        if ( value instanceof IRubyObject ) {
-            final IRubyObject rubyValue = (IRubyObject) value;
-            if ( rubyValue.isNil() ) {
-                statement.setNull(index, Types.OTHER); return;
-            }
-        }
-        else if ( value == null ) {
-            statement.setNull(index, Types.OTHER); return;
-        }
-
-        final PGobject pgTsVector = new PGobject();
-        pgTsVector.setType("tsvector");
-        pgTsVector.setValue(value.toString());
-        statement.setObject(index, pgTsVector);
-    }
-
-    private void setAddressParameter(final ThreadContext context,
-        final PreparedStatement statement, final int index,
-        Object value, final IRubyObject column,
-        final String columnType) throws SQLException {
-
-        if ( value instanceof IRubyObject ) {
-            final IRubyObject rubyValue = (IRubyObject) value;
-            if ( rubyValue.isNil() ) {
-                statement.setNull(index, Types.OTHER); return;
-            }
-            if (!isAr42(column)) { // Value has already been cast for AR42
-                value = column.getMetaClass().callMethod(context, "cidr_to_string", rubyValue);
-            }
-        }
-        else if ( value == null ) {
-            statement.setNull(index, Types.OTHER); return;
-        }
-
-        final PGobject pgAddress = new PGobject();
-        pgAddress.setType(columnType);
-        pgAddress.setValue(value.toString());
-        statement.setObject(index, pgAddress);
-    }
-
-    private void setRangeParameter(final ThreadContext context,
-        final PreparedStatement statement, final int index,
-        final Object value, final IRubyObject column,
-        final String columnType) throws SQLException {
-
-        final String rangeValue;
-
-        if ( value instanceof IRubyObject ) {
-            final IRubyObject rubyValue = (IRubyObject) value;
-            if ( rubyValue.isNil() ) {
-                statement.setNull(index, Types.OTHER); return;
-            }
-            rangeValue = column.getMetaClass().callMethod(context, "range_to_string", rubyValue).toString();
-        }
-        else {
-            if ( value == null ) {
-                statement.setNull(index, Types.OTHER); return;
-            }
-            rangeValue = value.toString();
-        }
-
-        final Object pgRange;
-        if ( columnType == (Object) "daterange" ) {
-            pgRange = new DateRangeType(rangeValue);
-        }
-        else if ( columnType == (Object) "tsrange" ) {
-            pgRange = new TsRangeType(rangeValue);
-        }
-        else if ( columnType == (Object) "tstzrange" ) {
-            pgRange = new TstzRangeType(rangeValue);
-        }
-        else if ( columnType == (Object) "int4range" ) {
-            pgRange = new Int4RangeType(rangeValue);
-        }
-        else if ( columnType == (Object) "int8range" ) {
-            pgRange = new Int8RangeType(rangeValue);
-        }
-        else { // if ( columnType == (Object) "numrange" )
-            pgRange = new NumRangeType(rangeValue);
-        }
-        statement.setObject(index, pgRange);
     }
 
     @Override
@@ -438,7 +260,7 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
         return sqlType;
     }
 
-    private static final int HSTORE_TYPE = 100000 + 1111;
+    //private static final int HSTORE_TYPE = 100000 + 1111;
 
     @Override
     protected int jdbcTypeFor(final ThreadContext context, final Ruby runtime,
@@ -471,7 +293,7 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
             case Types.BIT:
                 // we do get BIT for 't' 'f' as well as BIT strings e.g. "0110" :
                 final String bits = resultSet.getString(column);
-                if ( bits == null ) return runtime.getNil();
+                if ( bits == null ) return context.nil;
                 if ( bits.length() > 1 ) {
                     return RubyString.newUnicodeString(runtime, bits);
                 }
@@ -483,20 +305,65 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
     }
 
     @Override
+    protected boolean useByteStrings() { return true; }
+
+    @Override
+    protected IRubyObject dateToRuby(final ThreadContext context,
+        final Ruby runtime, final ResultSet resultSet, final int column)
+        throws SQLException {
+
+        if ( rawDateTime != null && rawDateTime.booleanValue() ) {
+            final byte[] value = resultSet.getBytes(column);
+            if ( value == null ) {
+                if ( resultSet.wasNull() ) return context.nil;
+                return RubyString.newEmptyString(runtime); // ""
+            }
+            return RubyString.newString(runtime, new ByteList(value, false));
+        }
+
+        final String value = resultSet.getString(column);
+        if ( value == null ) return context.nil;
+
+        return DateTimeUtils.parseDate(context, value);
+    }
+
+    @Override
+    protected IRubyObject timeToRuby(final ThreadContext context,
+        final Ruby runtime, final ResultSet resultSet, final int column)
+        throws SQLException {
+        return timestampToRuby(context, runtime, resultSet, column);
+    }
+
+    @Override
     protected IRubyObject timestampToRuby(final ThreadContext context,
         final Ruby runtime, final ResultSet resultSet, final int column)
         throws SQLException {
-        // NOTE: using Timestamp we loose information such as BC :
-        // Timestamp: '0001-12-31 22:59:59.0' String: '0001-12-31 22:59:59 BC'
-        final String value = resultSet.getString(column);
-        if ( value == null ) {
-            if ( resultSet.wasNull() ) return runtime.getNil();
-            return runtime.newString(); // ""
+
+        if ( rawDateTime != null && rawDateTime.booleanValue() ) {
+            final byte[] value = resultSet.getBytes(column);
+            if ( value == null ) {
+                if ( resultSet.wasNull() ) return context.nil;
+                return RubyString.newEmptyString(runtime); // ""
+            }
+            return RubyString.newString(runtime, new ByteList(value, false));
         }
 
-        final RubyString strValue = timestampToRubyString(runtime, value.toString());
-        if ( rawDateTime != null && rawDateTime.booleanValue() ) return strValue;
+        // NOTE: using Timestamp we would loose information such as BC :
+        // Timestamp: '0001-12-31 22:59:59.0' String: '0001-12-31 22:59:59 BC'
 
+        final String value = resultSet.getString(column);
+        if ( value == null ) return context.nil;
+
+        // string_to_time
+        final int len = value.length();
+        if ( (len == 8 || len == 9) && value.charAt(len - 1) == 'y' ) {
+            if ( value.charAt(0) == '-' ) { // 'infinity' / '-infinity'
+                return RubyFloat.newFloat(context.runtime, -RubyFloat.INFINITY);
+            }
+            return RubyFloat.newFloat(context.runtime, RubyFloat.INFINITY);
+        }
+        return DateTimeUtils.parseDateTime(context, value);
+        /*
         final IRubyObject adapter = callMethod(context, "adapter"); // self.adapter
         if ( usesType(runtime) ) {
             return typeCastFromDatabase(context, adapter, runtime.newSymbol("timestamp"), strValue);
@@ -504,6 +371,7 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
 
         if ( adapter.isNil() ) return strValue; // NOTE: we warn on init_connection
         return adapter.callMethod(context, "_string_to_timestamp", strValue);
+        */
     }
 
     @Override
@@ -518,9 +386,9 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
         // Method org.postgresql.jdbc4.Jdbc4Array.free() is not yet implemented.
         final Array value = resultSet.getArray(column);
 
-        if ( value == null && resultSet.wasNull() ) return runtime.getNil();
+        if ( value == null /* || resultSet.wasNull() */ ) return context.nil;
 
-        final RubyArray array = runtime.newArray();
+        final RubyArray array = RubyArray.newArray(runtime);
 
         final ResultSet arrayResult = value.getResultSet(); // 1: index, 2: value
         final int baseType = value.getBaseType();
@@ -531,39 +399,10 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
     }
 
     @Override
-    protected IRubyObject objectToRuby(final ThreadContext context,
+    protected final IRubyObject objectToRuby(final ThreadContext context,
         final Ruby runtime, final ResultSet resultSet, final int column)
         throws SQLException {
-
-        final Object object = resultSet.getObject(column);
-
-        if ( object == null && resultSet.wasNull() ) return runtime.getNil();
-
-        final Class<?> objectClass = object.getClass();
-        if ( objectClass == UUID.class ) {
-            return runtime.newString( object.toString() );
-        }
-
-        if ( objectClass == PGInterval.class ) {
-            return runtime.newString( formatInterval(object) );
-        }
-
-        if ( object instanceof PGobject ) {
-            // PG 9.2 JSON type will be returned here as well
-            return runtime.newString( object.toString() );
-        }
-
-        if ( object instanceof Map ) { // hstore
-            if ( rawHstoreType == Boolean.TRUE ) {
-                return runtime.newString( resultSet.getString(column) );
-            }
-            // by default we avoid double parsing by driver and than column :
-            final RubyHash rubyObject = RubyHash.newHash(runtime);
-            rubyObject.putAll((Map) object); // converts keys/values to ruby
-            return rubyObject;
-        }
-
-        return JavaUtil.convertJavaToRuby(runtime, object);
+        return driverImplementation().objectToRuby(context, resultSet, column);
     }
 
     @Override
@@ -576,47 +415,16 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
         return super.extractTableName(connection, catalog, schema, tableName);
     }
 
-    // NOTE: do not use PG classes in the API so that loading is delayed !
-    private String formatInterval(final Object object) {
-        final PGInterval interval = (PGInterval) object;
-        if ( rawIntervalType ) return interval.getValue();
-
-        final StringBuilder str = new StringBuilder(32);
-
-        final int years = interval.getYears();
-        if ( years != 0 ) str.append(years).append(" years ");
-        final int months = interval.getMonths();
-        if ( months != 0 ) str.append(months).append(" months ");
-        final int days = interval.getDays();
-        if ( days != 0 ) str.append(days).append(" days ");
-        final int hours = interval.getHours();
-        final int mins = interval.getMinutes();
-        final int secs = (int) interval.getSeconds();
-        if ( hours != 0 || mins != 0 || secs != 0 ) { // xx:yy:zz if not all 00
-            if ( hours < 10 ) str.append('0');
-            str.append(hours).append(':');
-            if ( mins < 10 ) str.append('0');
-            str.append(mins).append(':');
-            if ( secs < 10 ) str.append('0');
-            str.append(secs);
-        }
-        else {
-            if ( str.length() > 1 ) str.deleteCharAt( str.length() - 1 ); // " " at the end
-        }
-
-        return str.toString();
-    }
-
-    protected static Boolean rawArrayType;
+    static Boolean rawArrayType;
     static {
-        final String arrayRaw = System.getProperty("arjdbc.postgresql.array.raw");
+        final String arrayRaw = SafePropertyAccessor.getProperty("arjdbc.postgresql.array.raw");
         if ( arrayRaw != null ) rawArrayType = Boolean.parseBoolean(arrayRaw);
     }
 
     @JRubyMethod(name = "raw_array_type?", meta = true)
     public static IRubyObject useRawArrayType(final ThreadContext context, final IRubyObject self) {
-        if ( rawArrayType == null ) return context.getRuntime().getNil();
-        return context.getRuntime().newBoolean(rawArrayType);
+        if ( rawArrayType == null ) return context.nil;
+        return context.runtime.newBoolean(rawArrayType);
     }
 
     @JRubyMethod(name = "raw_array_type=", meta = true)
@@ -630,16 +438,16 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
         return value;
     }
 
-    protected static Boolean rawHstoreType;
+    static Boolean rawHstoreType;
     static {
-        final String hstoreRaw = System.getProperty("arjdbc.postgresql.hstore.raw");
+        final String hstoreRaw = SafePropertyAccessor.getProperty("arjdbc.postgresql.hstore.raw");
         if ( hstoreRaw != null ) rawHstoreType = Boolean.parseBoolean(hstoreRaw);
     }
 
     @JRubyMethod(name = "raw_hstore_type?", meta = true)
     public static IRubyObject useRawHstoreType(final ThreadContext context, final IRubyObject self) {
-        if ( rawHstoreType == null ) return context.getRuntime().getNil();
-        return context.getRuntime().newBoolean(rawHstoreType);
+        if ( rawHstoreType == null ) return context.nil;
+        return context.runtime.newBoolean(rawHstoreType);
     }
 
     @JRubyMethod(name = "raw_hstore_type=", meta = true)
@@ -660,11 +468,11 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
     // Rails style :
     // - 2 years 00:03:00
     // - -1 years -2 days
-    protected static boolean rawIntervalType = Boolean.getBoolean("arjdbc.postgresql.iterval.raw");
+    static boolean rawIntervalType = Boolean.getBoolean("arjdbc.postgresql.iterval.raw");
 
     @JRubyMethod(name = "raw_interval_type?", meta = true)
     public static IRubyObject useRawIntervalType(final ThreadContext context, final IRubyObject self) {
-        return context.getRuntime().newBoolean(rawIntervalType);
+        return context.runtime.newBoolean(rawIntervalType);
     }
 
     @JRubyMethod(name = "raw_interval_type=", meta = true)
@@ -676,87 +484,6 @@ public class PostgreSQLRubyJdbcConnection extends arjdbc.jdbc.RubyJdbcConnection
             rawIntervalType = ! value.isNil();
         }
         return value;
-    }
-
-    // NOTE: without these custom registered Postgre (driver) types
-    // ... we can not set range parameters in prepared statements !
-
-    public static class DateRangeType extends PGobject {
-
-        public DateRangeType() {
-            setType("daterange");
-        }
-
-        public DateRangeType(final String value) throws SQLException {
-            this();
-            setValue(value);
-        }
-
-    }
-
-    public static class TsRangeType extends PGobject {
-
-        public TsRangeType() {
-            setType("tsrange");
-        }
-
-        public TsRangeType(final String value) throws SQLException {
-            this();
-            setValue(value);
-        }
-
-    }
-
-    public static class TstzRangeType extends PGobject {
-
-        public TstzRangeType() {
-            setType("tstzrange");
-        }
-
-        public TstzRangeType(final String value) throws SQLException {
-            this();
-            setValue(value);
-        }
-
-    }
-
-    public static class Int4RangeType extends PGobject {
-
-        public Int4RangeType() {
-            setType("int4range");
-        }
-
-        public Int4RangeType(final String value) throws SQLException {
-            this();
-            setValue(value);
-        }
-
-    }
-
-    public static class Int8RangeType extends PGobject {
-
-        public Int8RangeType() {
-            setType("int8range");
-        }
-
-        public Int8RangeType(final String value) throws SQLException {
-            this();
-            setValue(value);
-        }
-
-    }
-
-    public static class NumRangeType extends PGobject {
-
-        public NumRangeType() {
-            setType("numrange");
-        }
-
-        public NumRangeType(final String value) throws SQLException {
-            this();
-            setValue(value);
-        }
-
     }
 
 }

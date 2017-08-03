@@ -1,16 +1,17 @@
 require File.expand_path('test_helper', File.dirname(__FILE__))
 
 require 'simple'
-require 'has_many_through'
 require 'row_locking'
+require 'custom_select_test_methods'
+require 'xml_column_test_methods'
 
 class MySQLSimpleTest < Test::Unit::TestCase
   include SimpleTestMethods
-  include ActiveRecord3TestMethods
   include ColumnNameQuotingTests
   include DirtyAttributeTests
-  include XmlColumnTestMethods
+
   include CustomSelectTestMethods
+  include XmlColumnTestMethods
 
   # @override
   def test_execute_update
@@ -45,6 +46,16 @@ class MySQLSimpleTest < Test::Unit::TestCase
     # '2013-08-02 15:50:47'.length == 19
     assert_match str[0, 19], e.sample_string
     assert_match str[0, 19], e.sample_text
+  end
+
+  # @override
+  def test_partial_update_with_updated_at
+    add_ignored_sql('/* BEGIN */ SET autocommit=0') { super }
+  end
+
+  # @override
+  def test_partial_update_with_updated_on
+    add_ignored_sql('/* BEGIN */ SET autocommit=0') { super }
   end
 
   column_quote_char "`"
@@ -241,12 +252,6 @@ class MySQLSimpleTest < Test::Unit::TestCase
     end
   end
 
-  test 'returns correct visitor type' do
-    assert_not_nil visitor = connection.instance_variable_get(:@visitor)
-    assert defined? Arel::Visitors::MySQL
-    assert_kind_of Arel::Visitors::MySQL, visitor
-  end if ar_version('3.0')
-
   test 'sets default connection properties' do
     connection = ActiveRecord::Base.connection.jdbc_connection(true)
     if connection.java_class.name =~ /^com.mysql.jdbc/
@@ -257,9 +262,9 @@ class MySQLSimpleTest < Test::Unit::TestCase
 
   test "config :host" do
     skip unless MYSQL_CONFIG[:database] # JDBC :url defined instead
-    skip if mariadb_driver?
+    adapter = MYSQL_CONFIG[:adapter] # mysql or mariadb
     begin
-      config = { :adapter => 'mysql', :port => 3306 }
+      config = { :adapter => adapter, :port => 3306 }
       config[:username] = MYSQL_CONFIG[:username]
       config[:password] = MYSQL_CONFIG[:password]
       config[:database] = MYSQL_CONFIG[:database]
@@ -271,6 +276,33 @@ class MySQLSimpleTest < Test::Unit::TestCase
 #      with_connection(config.merge :host => host, :port => nil) do |connection|
 #        assert_match /^jdbc:mysql:\/\/.*?127.0.0.1\//, connection.config[:url]
 #      end
+    ensure
+      ActiveRecord::Base.establish_connection(MYSQL_CONFIG)
+    end
+  end if defined? JRUBY_VERSION
+
+  test "read-only connection" do
+    record = Entry.create! :title => 'read-only test'
+    read_only = ActiveRecord::Base.connection.read_only?
+    assert_equal false, read_only
+    skip if mariadb_driver?
+    begin
+      ActiveRecord::Base.connection.read_only = true
+      assert_equal true, ActiveRecord::Base.connection.read_only?
+
+      ActiveRecord::Base.connection.execute('select VERSION()')
+
+      record.reload
+      record.content = '1234567890'
+      begin
+        record.save!
+        fail 'record saved on read-only connection'
+      rescue ActiveRecord::ActiveRecordError => e
+        assert e
+      end
+
+      ActiveRecord::Base.connection.read_only = false
+      record.save!
     ensure
       ActiveRecord::Base.establish_connection(MYSQL_CONFIG)
     end
@@ -414,8 +446,10 @@ class MySQLSimpleTest < Test::Unit::TestCase
 
 end
 
+require 'has_many_through_test_methods'
+
 class MySQLHasManyThroughTest < Test::Unit::TestCase
-  include HasManyThroughMethods
+  include HasManyThroughTestMethods
 end
 
 class MySQLForeignKeyTest < Test::Unit::TestCase

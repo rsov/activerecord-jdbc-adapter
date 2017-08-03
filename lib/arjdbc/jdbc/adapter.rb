@@ -4,17 +4,20 @@ require 'active_record/connection_adapters/abstract_adapter'
 require 'arjdbc/version'
 require 'arjdbc/jdbc/java'
 require 'arjdbc/jdbc/base_ext'
+require 'arjdbc/jdbc/error'
 require 'arjdbc/jdbc/connection_methods'
-require 'arjdbc/jdbc/driver'
 require 'arjdbc/jdbc/column'
 require 'arjdbc/jdbc/connection'
 require 'arjdbc/jdbc/arel_support'
 require 'arjdbc/jdbc/callbacks'
 require 'arjdbc/jdbc/extension'
-require 'arjdbc/jdbc/type_converter'
 
 module ActiveRecord
   module ConnectionAdapters
+
+    autoload :JdbcDriver, 'arjdbc/jdbc/driver' # compatibility - no longer used
+    autoload :JdbcTypeConverter, 'arjdbc/jdbc/type_converter'
+
     # Built on top of `ActiveRecord::ConnectionAdapters::AbstractAdapter` which
     # provides the abstract interface for database-specific functionality, this
     # class serves 2 purposes in AR-JDBC :
@@ -55,53 +58,70 @@ module ActiveRecord
       # @param logger the `ActiveRecord::Base.logger` to use (or nil)
       # @param config the database configuration
       # @note `initialize(logger, config)` with 2 arguments is supported as well
-      def initialize(connection, logger, config = nil)
-        # AR : initialize(connection, logger = nil, pool = nil)
-        # AR < 3.2 : initialize(connection, logger = nil)
-        if config.nil? && logger.respond_to?(:key?) # (logger, config)
-          config, logger, connection = logger, connection, nil
+      def initialize(connection, logger, config = nil); pool = nil
+        if config.nil?
+          if logger.respond_to?(:key?) # (logger, config)
+            config, logger, connection = logger, connection, nil
+          else
+            config = connection.respond_to?(:config) ?
+              connection.config : ActiveRecord::Base.connection_pool.spec.config
+          end
+        elsif config.respond_to?(:spec) && config.respond_to?(:connection)
+          pool = config; config = pool.spec.config # AR >= 3.2 compatibility
         end
 
         @config = config.respond_to?(:symbolize_keys) ? config.symbolize_keys : config
-        # NOTE: JDBC 4.0 drivers support checking if connection isValid
-        # thus no need to @config[:connection_alive_sql] ||= 'SELECT 1'
-        #
-        # NOTE: setup to retry 5-times previously - maybe do not set at all ?
-        @config[:retry_count] ||= 1
 
-        @config[:adapter_spec] = adapter_spec(@config) unless @config.key?(:adapter_spec)
-        spec = @config[:adapter_spec]
+        if self.class.equal? JdbcAdapter
+          spec = @config.key?(:adapter_spec) ? @config[:adapter_spec] :
+            ( @config[:adapter_spec] = adapter_spec(@config) ) # due resolving visitor
+          extend spec if spec
+        end
 
         # NOTE: adapter spec's init_connection only called if instantiated here :
         connection ||= jdbc_connection_class(spec).new(@config, self)
 
-        super(connection, logger)
+        pool.nil? ? super(connection, logger) : super(connection, logger, pool)
 
-        # kind of like `extend ArJdbc::MyDB if self.class == JdbcAdapter` :
-        klass = @config[:adapter_class]
-        extend spec if spec && ( ! klass || klass == JdbcAdapter)
-
-        # NOTE: should not be necessary for JNDI due reconnect! on checkout :
-        configure_connection if respond_to?(:configure_connection)
+        connection.configure_connection # will call us (maybe)
 
         @visitor = new_visitor # nil if no AREL (AR-2.3)
       end
+
+      # By convention sub-adapters are expected to export a JDBC connection
+      # type they wish the adapter instantiates on {#initialize} by default.
+      # @since 1.4.0
+      JdbcConnection = ::ActiveRecord::ConnectionAdapters::JdbcConnection
 
       # Returns the (JDBC) connection class to be used for this adapter.
       # This is used by (database specific) spec modules to override the class
       # used assuming some of the available methods have been re-defined.
       # @see ActiveRecord::ConnectionAdapters::JdbcConnection
-      def jdbc_connection_class(spec)
+      def self.jdbc_connection_class(spec)
         connection_class = spec.jdbc_connection_class if spec && spec.respond_to?(:jdbc_connection_class)
-        connection_class ? connection_class : ::ActiveRecord::ConnectionAdapters::JdbcConnection
+        connection_class ? connection_class : self::JdbcConnection
+      end
+
+      # @note The spec argument passed is ignored and shall no longer be used.
+      # @see ActiveRecord::ConnectionAdapters::JdbcConnection#jdbc_connection_class
+      def jdbc_connection_class(spec = nil)
+        spec ? self.class.jdbc_connection_class(spec) : self.class::JdbcConnection
       end
 
       # Returns the (JDBC) `ActiveRecord` column class for this adapter.
       # This is used by (database specific) spec modules to override the class.
       # @see ActiveRecord::ConnectionAdapters::JdbcColumn
       def jdbc_column_class
-        ::ActiveRecord::ConnectionAdapters::JdbcColumn
+        return self.class::Column if self.class.const_defined?(:Column)
+        ::ActiveRecord::ConnectionAdapters::JdbcColumn # TODO auto-load
       end
+
+      # @private Simple fix for keeping 1.8 compatibility.
+      def jdbc_column_class
+        column = self.class::Column rescue nil
+        return column if column
+        ::ActiveRecord::ConnectionAdapters::JdbcColumn # TODO auto-load
+      end if RUBY_VERSION < '1.9'
 
       # Retrieve the raw `java.sql.Connection` object.
       # The unwrap parameter is useful if an attempt to unwrap a pooled (JNDI)
@@ -109,22 +129,7 @@ module ActiveRecord
       # @param unwrap [true, false] whether to unwrap the connection object
       # @return [Java::JavaSql::Connection] the JDBC connection
       def jdbc_connection(unwrap = nil)
-        java_connection = raw_connection.connection
-        return java_connection unless unwrap
-        connection_class = java.sql.Connection.java_class
-        begin
-          if java_connection.wrapper_for?(connection_class)
-            return java_connection.unwrap(connection_class) # java.sql.Wrapper.unwrap
-          end
-        rescue Java::JavaLang::AbstractMethodError => e
-          ArJdbc.warn("driver/pool connection impl does not support unwrapping (#{e})")
-        end
-        if java_connection.respond_to?(:connection)
-          # e.g. org.apache.tomcat.jdbc.pool.PooledConnection
-          java_connection.connection # getConnection
-        else
-          java_connection
-        end
+        raw_connection.jdbc_connection(unwrap)
       end
 
       # Locate the specialized (database specific) adapter specification module
@@ -136,7 +141,7 @@ module ActiveRecord
       # @param config the configuration to check for `:adapter_spec`
       # @return [Module] the database specific module
       def adapter_spec(config)
-        dialect = (config[:dialect] || config[:driver]).to_s
+        dialect = ( config[:dialect] || config[:driver] ).to_s
         ::ArJdbc.modules.each do |constant| # e.g. ArJdbc::MySQL
           if constant.respond_to?(:adapter_matcher)
             spec = constant.adapter_matcher(dialect, config)
@@ -144,18 +149,14 @@ module ActiveRecord
           end
         end
 
-        if (config[:jndi] || config[:data_source]) && ! config[:dialect]
-          begin
-            data_source = config[:data_source] ||
-              Java::JavaxNaming::InitialContext.new.lookup(config[:jndi])
-            connection = data_source.getConnection
-            config[:dialect] = connection.getMetaData.getDatabaseProductName
-          rescue Java::JavaSql::SQLException => e
-            warn "failed to set database :dialect from connection meda-data (#{e})"
-          else
-            return adapter_spec(config) # re-try matching a spec with set config[:dialect]
-          ensure
-            connection.close if connection  # return to the pool
+        unless config.key?(:dialect)
+          begin # does nothing unless config[:jndi] || config[:data_source]
+            dialect = ::ArJdbc.with_meta_data_from_data_source_if_any(config) do
+              |meta_data| config[:dialect] = meta_data.getDatabaseProductName
+            end
+            return adapter_spec(config) if dialect # re-try matching with :dialect
+          rescue => e
+            ::ArJdbc.warn("failed to set :dialect from database meda-data: #{e}")
           end
         end
 
@@ -169,7 +170,6 @@ module ActiveRecord
         ADAPTER_NAME
       end
 
-      # @override
       # Will return true even when native adapter classes passed in
       # e.g. `jdbc_adapter.is_a? ConnectionAdapter::PostgresqlAdapter`
       #
@@ -177,6 +177,8 @@ module ActiveRecord
       # `config[:adapter_class]` is forced to `nil` and the `:adapter_spec`
       # module is used to extend the `JdbcAdapter`, otherwise we replace the
       # class constants for built-in adapters (MySQL, PostgreSQL and SQLite3).
+      # @override
+      # @private
       def is_a?(klass)
         # This is to fake out current_adapter? conditional logic in AR tests
         if klass.is_a?(Class) && klass.name =~ /#{adapter_name}Adapter$/i
@@ -186,16 +188,17 @@ module ActiveRecord
         end
       end
 
-      # @deprecated re-implemented - no longer used
-      # @return [Hash] the AREL visitor to use
       # If there's a `self.arel2_visitors(config)` method on the adapter
       # spec than it is preferred and will be used instead of this one.
+      # @return [Hash] the AREL visitor to use
+      # @deprecated No longer used.
+      # @see ActiveRecord::ConnectionAdapters::Jdbc::ArelSupport
       def self.arel2_visitors(config)
         { 'jdbc' => ::Arel::Visitors::ToSql }
       end
 
-      # @deprecated re-implemented - no longer used
-      # @see #arel2_visitors
+      # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#arel2_visitors
+      # @deprecated No longer used.
       def self.configure_arel2_visitors(config)
         visitors = ::Arel::Visitors::VISITORS
         klass = config[:adapter_spec]
@@ -253,44 +256,9 @@ module ActiveRecord
         @connection.database_name
       end
 
-      # @private
-      def native_sql_to_type(type)
-        if /^(.*?)\(([0-9]+)\)/ =~ type
-          tname, limit = $1, $2.to_i
-          ntypes = native_database_types
-          if ntypes[:primary_key] == type
-            return :primary_key, nil
-          else
-            ntypes.each do |name, val|
-              if name == :primary_key
-                next
-              end
-              if val[:name].downcase == tname.downcase &&
-                  ( val[:limit].nil? || val[:limit].to_i == limit )
-                return name, limit
-              end
-            end
-          end
-        elsif /^(.*?)/ =~ type
-          tname = $1
-          ntypes = native_database_types
-          if ntypes[:primary_key] == type
-            return :primary_key, nil
-          else
-            ntypes.each do |name, val|
-              if val[:name].downcase == tname.downcase && val[:limit].nil?
-                return name, nil
-              end
-            end
-          end
-        else
-          return :string, 255
-        end
-        return nil, nil
-      end
-
       # @override
       def active?
+        return false unless @connection
         @connection.active?
       end
 
@@ -302,8 +270,17 @@ module ActiveRecord
 
       # @override
       def disconnect!
-        @connection.disconnect!
+        @connection.disconnect! if @connection
       end
+
+      # @override
+      #def verify!(*ignored)
+      #  if @connection && @connection.jndi?
+      #    # checkout call-back does #reconnect!
+      #  else
+      #    reconnect! unless active? # super
+      #  end
+      #end
 
       if ActiveRecord::VERSION::MAJOR < 3
 
@@ -435,6 +412,22 @@ module ActiveRecord
       # @override
       def supports_views?
         @connection.supports_views?
+      end
+
+      # AR-JDBC extension that allows you to have read-only connections.
+      # Read-only connection do not allow any inserts/updates, such operations fail.
+      # @return [Boolean] whether the underlying conn is read-only (false by default)
+      # @since 1.4.0
+      def read_only?
+        @connection.read_only?
+      end
+
+      # AR-JDBC extension that allows you to have read-only connections.
+      # @param flag the read-only flag to set
+      # @see #read_only?
+      # @since 1.4.0
+      def read_only=(flag)
+        @connection.read_only = flag
       end
 
       # Executes a SQL query in the context of this connection using the bind
@@ -702,10 +695,33 @@ module ActiveRecord
           sql = "#{sql} #{binds.inspect}"
         end
         super(sql, name || 'SQL') # `log(sql, name)` on AR <= 3.0
-      end if ActiveRecord::VERSION::MAJOR < 3 ||
-        ( ActiveRecord::VERSION::MAJOR == 3 && ActiveRecord::VERSION::MINOR < 1 )
+      end if ::ActiveRecord::VERSION::MAJOR < 3 ||
+        ( ::ActiveRecord::VERSION::MAJOR == 3 && ::ActiveRecord::VERSION::MINOR < 1 )
+
+      if ::ActiveRecord::VERSION::MAJOR > 3
+        # @private
+        WrappingStatementInvalid = ::ActiveRecord::StatementInvalid
+      elsif ::ActiveRecord::VERSION::MAJOR > 2
+        # @private AR 3.x : WrappedDatabaseException < StatementInvalid
+        WrappingStatementInvalid = ::ActiveRecord::WrappedDatabaseException
+      else # 2.3
+        # does not have a translate_exception but does this in log :
+        #   raise ActiveRecord::StatementInvalid, message
+        #
+        # NOTE: still suitable to patch due JDBCError assuming super(msg, cause)
+        ::ActiveRecord::StatementInvalid.class_eval do
+          # attr_reader :original_exception
+          def initialize(message, original_exception = nil)
+            super(message)
+            @original_exception = original_exception
+          end
+        end
+        # @private
+        WrappingStatementInvalid = ::ActiveRecord::StatementInvalid
+      end
 
       def translate_exception(e, message)
+        return e if e.is_a?(JDBCError)
         # we shall not translate native "Java" exceptions as they might
         # swallow an ArJdbc / driver bug into a AR::StatementInvalid ...
         return e if e.is_a?(NativeException) # JRuby 1.6
@@ -713,8 +729,7 @@ module ActiveRecord
 
         case e
         when SystemExit, SignalException, NoMemoryError then e
-        # NOTE: wraps AR::JDBCError into AR::StatementInvalid, desired ?!
-        else super
+        else WrappingStatementInvalid.new(message, e) # super
         end
       end
 
@@ -831,13 +846,13 @@ module ActiveRecord
       else
         @@suble_binds = ActiveRecord::VERSION::MAJOR < 4 # due compatibility
       end
+      # @deprecated
       def self.suble_binds?; @@suble_binds; end
-      def self.suble_binds=(flag); @@suble_binds = flag; end # remove on 1.4
 
       private
 
       # @note Since AR 4.0 we (finally) do not "sub" SQL's '?' parameters !
-      # @deprecated This should go away (hopefully), now here due 1.2.x.
+      # @deprecated expected to go away in a future version that drops AR 3.2
       def suble_binds(sql, binds)
         return sql if ! @@suble_binds || binds.nil? || binds.empty?
         binds = binds.dup; warn = nil
@@ -886,8 +901,7 @@ module ActiveRecord
 
       protected
 
-      # @return whether the given SQL string is a 'SELECT' like
-      # query (returning a result set)
+      # @return whether the given SQL string is a 'SELECT' like query (returning a results)
       def self.select?(sql)
         JdbcConnection::select?(sql)
       end
@@ -897,7 +911,7 @@ module ActiveRecord
         JdbcConnection::insert?(sql)
       end
 
-      # @return whether the given SQL string is an 'UPDATE' (or 'DELETE') query
+      # @return whether the given SQL string is an 'UPDATE' (or 'DELETE') like query
       def self.update?(sql)
         ! select?(sql) && ! insert?(sql)
       end

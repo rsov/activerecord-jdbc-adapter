@@ -190,5 +190,9 @@ class FirebirdUnitTest < Test::Unit::TestCase
       assert_equal "#{expected} ", Entry.limit(3).offset(3).to_sql
     end
   end
+  
+end
 
+class FirebirdHasManyThroughTest < Test::Unit::TestCase
+  include HasManyThroughTestMethods
 end

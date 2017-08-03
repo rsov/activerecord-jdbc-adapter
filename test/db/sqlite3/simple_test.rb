@@ -2,11 +2,9 @@ require 'db/sqlite3'
 require 'models/data_types'
 require 'models/validates_uniqueness_of_string'
 require 'simple'
-require 'jdbc_common'
 
 class SQLite3SimpleTest < Test::Unit::TestCase
   include SimpleTestMethods
-  include ActiveRecord3TestMethods
   include ColumnNameQuotingTests
   include DirtyAttributeTests
   include XmlColumnTestMethods
@@ -144,6 +142,11 @@ class SQLite3SimpleTest < Test::Unit::TestCase
     assert_equal index_name, indexes.first.name
     assert ! indexes.first.unique
     assert_equal ["name"], indexes.first.columns
+  end
+
+  def test_execute_pragma_works
+    index_name = "entries_index"
+    connection.execute("PRAGMA index_info('#{index_name}')")
   end
 
   def test_column_default

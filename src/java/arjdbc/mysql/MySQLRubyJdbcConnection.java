@@ -27,6 +27,8 @@ package arjdbc.mysql;
 
 import arjdbc.jdbc.RubyJdbcConnection;
 import arjdbc.jdbc.Callable;
+import arjdbc.jdbc.DriverWrapper;
+import arjdbc.util.DateTimeUtils;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -39,13 +41,13 @@ import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.jruby.Ruby;
 import org.jruby.RubyArray;
 import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
 import org.jruby.RubyFloat;
 import org.jruby.RubyInteger;
 import org.jruby.RubyModule;
@@ -54,30 +56,59 @@ import org.jruby.exceptions.RaiseException;
 import org.jruby.runtime.ObjectAllocator;
 import org.jruby.runtime.ThreadContext;
 import org.jruby.runtime.builtin.IRubyObject;
+import org.jruby.util.SafePropertyAccessor;
 import org.jruby.util.ByteList;
 
 /**
  *
  * @author nicksieger
  */
+@org.jruby.anno.JRubyClass(name = "ActiveRecord::ConnectionAdapters::MySQLJdbcConnection")
 public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
     private static final long serialVersionUID = -8842614212147138733L;
 
-    protected MySQLRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
+    public MySQLRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
         super(runtime, metaClass);
     }
 
-    private static ObjectAllocator MYSQL_JDBCCONNECTION_ALLOCATOR = new ObjectAllocator() {
+    public static RubyClass createMySQLJdbcConnectionClass(Ruby runtime, RubyClass jdbcConnection) {
+        RubyClass clazz = getConnectionAdapters(runtime).
+            defineClassUnder("MySQLJdbcConnection", jdbcConnection, ALLOCATOR);
+        clazz.defineAnnotatedMethods(MySQLRubyJdbcConnection.class);
+        return clazz;
+    }
+
+    public static RubyClass load(final Ruby runtime) {
+        RubyClass jdbcConnection = getJdbcConnection(runtime);
+        return createMySQLJdbcConnectionClass(runtime, jdbcConnection);
+    }
+
+    protected static ObjectAllocator ALLOCATOR = new ObjectAllocator() {
         public IRubyObject allocate(Ruby runtime, RubyClass klass) {
             return new MySQLRubyJdbcConnection(runtime, klass);
         }
     };
 
-    public static RubyClass createMySQLJdbcConnectionClass(Ruby runtime, RubyClass jdbcConnection) {
-        RubyClass clazz = getConnectionAdapters(runtime).
-            defineClassUnder("MySQLJdbcConnection", jdbcConnection, MYSQL_JDBCCONNECTION_ALLOCATOR);
-        clazz.defineAnnotatedMethods(MySQLRubyJdbcConnection.class);
-        return clazz;
+    @Override
+    protected DriverWrapper newDriverWrapper(final ThreadContext context, final String driver) {
+        DriverWrapper driverWrapper = super.newDriverWrapper(context, driver);
+
+        final java.sql.Driver jdbcDriver = driverWrapper.getDriverInstance();
+        if ( jdbcDriver.getClass().getName().startsWith("com.mysql.jdbc.") ) {
+            final int major = jdbcDriver.getMajorVersion();
+            final int minor = jdbcDriver.getMinorVersion();
+            if ( major < 5 ) {
+                final RubyClass errorClass = getConnectionNotEstablished(context.runtime);
+                throw new RaiseException(context.runtime, errorClass,
+                    "MySQL adapter requires driver >= 5.0 got: " + major + "." + minor + "", false);
+            }
+            if ( major == 5 && minor < 1 ) { // need 5.1 for JDBC 4.0
+                // lightweight validation query: "/* ping */ SELECT 1"
+                setConfigValueIfNotSet(context, "connection_alive_sql", context.runtime.newString("/* ping */ SELECT 1"));
+            }
+        }
+
+        return driverWrapper;
     }
 
     @Override
@@ -89,9 +120,10 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
     @Override
     protected IRubyObject mapGeneratedKeysOrUpdateCount(final ThreadContext context,
         final Connection connection, final Statement statement) throws SQLException {
-        final Ruby runtime = context.getRuntime();
+        final Ruby runtime = context.runtime;
         final IRubyObject key = mapGeneratedKeys(runtime, connection, statement);
-        return ( key == null || key.isNil() ) ? runtime.newFixnum( statement.getUpdateCount() ) : key;
+        return ( key == null || key.isNil() ) ?
+            RubyFixnum.newFixnum( runtime, statement.getUpdateCount() ) : key;
     }
 
     @Override
@@ -112,6 +144,20 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
         return super.jdbcToRuby(context, runtime, column, type, resultSet);
     }
 
+    @Override
+    protected boolean useByteStrings() {
+        final Boolean useByteStrings = byteStrings; // true by default :
+        return useByteStrings == null ? true : useByteStrings.booleanValue();
+    }
+
+    /*
+    @Override // optimized CLOBs
+    protected IRubyObject readerToRuby(final ThreadContext context,
+        final Ruby runtime, final ResultSet resultSet, final int column)
+        throws SQLException {
+        return bytesToUTF8String(context, runtime, resultSet, column);
+    } */
+
     @Override // can not use statement.setTimestamp( int, Timestamp, Calendar )
     protected void setTimestampParameter(final ThreadContext context,
         final Connection connection, final PreparedStatement statement,
@@ -119,15 +165,15 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
         final IRubyObject column, final int type) throws SQLException {
         if ( value.isNil() ) statement.setNull(index, Types.TIMESTAMP);
         else {
-            value = getTimeInDefaultTimeZone(context, value);
+            value = DateTimeUtils.getTimeInDefaultTimeZone(context, value);
             if ( value instanceof RubyString ) { // yyyy-[m]m-[d]d hh:mm:ss[.f...]
                 final Timestamp timestamp = Timestamp.valueOf( value.toString() );
                 statement.setTimestamp( index, timestamp ); // assume local time-zone
             }
             else { // Time or DateTime ( ActiveSupport::TimeWithZone.to_time )
-                final double time = adjustTimeFromDefaultZone(value);
-                final RubyFloat timeValue = context.getRuntime().newFloat( time );
-                statement.setTimestamp( index, convertToTimestamp(timeValue) );
+                final double time = DateTimeUtils.adjustTimeFromDefaultZone(value);
+                final RubyFloat timeValue = context.runtime.newFloat( time );
+                statement.setTimestamp( index, DateTimeUtils.convertToTimestamp(timeValue) );
             }
         }
     }
@@ -139,27 +185,18 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
         final IRubyObject column, final int type) throws SQLException {
         if ( value.isNil() ) statement.setNull(index, Types.TIME);
         else {
-            value = getTimeInDefaultTimeZone(context, value);
+            value = DateTimeUtils.getTimeInDefaultTimeZone(context, value);
             if ( value instanceof RubyString ) {
                 final Time time = Time.valueOf( value.toString() );
                 statement.setTime( index, time ); // assume local time-zone
             }
             else { // Time or DateTime ( ActiveSupport::TimeWithZone.to_time )
-                final double timeValue = adjustTimeFromDefaultZone(value);
+                final double timeValue = DateTimeUtils.adjustTimeFromDefaultZone(value);
                 final Time time = new Time(( (long) timeValue ) * 1000); // millis
                 // java.sql.Time is expected to be only up to second precision
                 statement.setTime( index, time );
             }
         }
-    }
-
-    private static double adjustTimeFromDefaultZone(final IRubyObject value) {
-        // Time's to_f is : ( millis * 1000 + usec ) / 1_000_000.0
-        final double time = value.convertToFloat().getDoubleValue(); // to_f
-        // NOTE: MySQL assumes default TZ thus need to adjust to match :
-        final int offset = TimeZone.getDefault().getOffset((long) time * 1000);
-        // Time's to_f is : ( millis * 1000 + usec ) / 1_000_000.0
-        return time - ( offset / 1000.0 );
     }
 
     @Override
@@ -199,25 +236,24 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
     }
 
     @Override
-    protected IRubyObject indexes(final ThreadContext context, final String tableName, final String name, final String schemaName) {
-        return withConnection(context, new Callable<IRubyObject>() {
-            public IRubyObject call(final Connection connection) throws SQLException {
-                final Ruby runtime = context.getRuntime();
-                final RubyModule indexDefinition = getIndexDefinition(runtime);
+    protected RubyArray indexes(final ThreadContext context,
+        final String tableName, final String name, final String schemaName) {
+        return withConnection(context, new Callable<RubyArray>() {
+            public RubyArray call(final Connection connection) throws SQLException {
+                final Ruby runtime = context.runtime;
+                final RubyModule IndexDefinition = getIndexDefinition(runtime);
                 final String jdbcTableName = caseConvertIdentifierForJdbc(connection, tableName);
                 final String jdbcSchemaName = caseConvertIdentifierForJdbc(connection, schemaName);
-                final IRubyObject rubyTableName = RubyString.newUnicodeString(
-                    runtime, caseConvertIdentifierForJdbc(connection, tableName)
+                final RubyString rubyTableName = cachedString(
+                    context, caseConvertIdentifierForJdbc(connection, tableName)
                 );
 
-                StringBuilder query = new StringBuilder("SHOW KEYS FROM ");
-                if (jdbcSchemaName != null) {
-                    query.append(jdbcSchemaName).append(".");
-                }
+                StringBuilder query = new StringBuilder(60).append("SHOW KEYS FROM ");
+                if ( jdbcSchemaName != null ) query.append(jdbcSchemaName).append('.');
                 query.append(jdbcTableName);
                 query.append(" WHERE key_name != 'PRIMARY'");
 
-                final RubyArray indexes = runtime.newArray(8);
+                final RubyArray indexes = RubyArray.newArray(runtime, 8);
                 PreparedStatement statement = null;
                 ResultSet keySet = null;
 
@@ -226,6 +262,8 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
                     keySet = statement.executeQuery();
 
                     String currentKeyName = null;
+                    RubyArray currentColumns = null;
+                    RubyArray currentLengths = null;
 
                     while ( keySet.next() ) {
                         final String keyName = caseConvertIdentifierForRails(connection, keySet.getString("key_name"));
@@ -238,24 +276,21 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
                             IRubyObject[] args = new IRubyObject[] {
                                 rubyTableName, // table_name
                                 RubyString.newUnicodeString(runtime, keyName), // index_name
-                                runtime.newBoolean( ! nonUnique ), // unique
-                                runtime.newArray(), // [] for column names, we'll add to that in just a bit
-                                runtime.newArray() // lengths
+                                nonUnique ? runtime.getFalse() : runtime.getTrue(), // unique
+                                currentColumns = RubyArray.newArray(runtime, 4), // columns
+                                currentLengths = RubyArray.newArray(runtime, 4) // lengths
                             };
 
-                            indexes.append( indexDefinition.callMethod(context, "new", args) ); // IndexDefinition.new
+                            indexes.append( IndexDefinition.callMethod(context, "new", args) ); // IndexDefinition.new
                         }
 
-                        IRubyObject lastIndexDef = indexes.isEmpty() ? null : indexes.entry(-1);
-                        if ( lastIndexDef != null ) {
+                        if ( currentColumns != null ) {
                             final String columnName = caseConvertIdentifierForRails(connection, keySet.getString("column_name"));
                             final int length = keySet.getInt("sub_part");
-                            final boolean nullLength = keySet.wasNull();
+                            final boolean nullLength = length == 0 && keySet.wasNull();
 
-                            lastIndexDef.callMethod(context, "columns").callMethod(context,
-                                    "<<", RubyString.newUnicodeString(runtime, columnName));
-                            lastIndexDef.callMethod(context, "lengths").callMethod(context,
-                                    "<<", nullLength ? runtime.getNil() : runtime.newFixnum(length));
+                            currentColumns.callMethod(context, "<<", cachedString(context, columnName));
+                            currentLengths.callMethod(context, "<<", nullLength ? context.nil : RubyFixnum.newFixnum(runtime, length));
                         }
                     }
 
@@ -269,11 +304,24 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
         });
     }
 
+    // MySQL does never storesUpperCaseIdentifiers() :
+    // storesLowerCaseIdentifiers() depends on "lower_case_table_names" server variable
+
     @Override
-    protected String caseConvertIdentifierForRails(final Connection connection, final String value)
-        throws SQLException {
+    protected final String caseConvertIdentifierForRails(
+        final Connection connection, final String value) throws SQLException {
         if ( value == null ) return null;
-        return value; // MySQL does not storesUpperCaseIdentifiers() :
+        return value;
+    }
+
+    @Override
+    protected final String caseConvertIdentifierForJdbc(
+        final Connection connection, final String value) throws SQLException {
+        if ( value == null ) return null;
+        if ( connection.getMetaData().storesLowerCaseIdentifiers() ) {
+            return value.toLowerCase();
+        }
+        return value;
     }
 
     @Override
@@ -286,7 +334,7 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
 
     private static Boolean stopCleanupThread;
     static {
-        final String stopThread = System.getProperty("arjdbc.mysql.stop_cleanup_thread");
+        final String stopThread = SafePropertyAccessor.getProperty("arjdbc.mysql.stop_cleanup_thread");
         if ( stopThread != null ) stopCleanupThread = Boolean.parseBoolean(stopThread);
     }
 
@@ -297,14 +345,15 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
 
     private static boolean cleanupThreadShutdown;
 
+    @SuppressWarnings("unchecked")
     private static void shutdownCleanupThread() {
         if ( cleanupThreadShutdown ) return;
         try {
-            Class threadClass = Class.forName("com.mysql.jdbc.AbandonedConnectionCleanupThread");
+            Class<?> threadClass = Class.forName("com.mysql.jdbc.AbandonedConnectionCleanupThread");
             threadClass.getMethod("shutdown").invoke(null);
         }
         catch (ClassNotFoundException e) {
-            debugMessage("INFO: missing MySQL JDBC cleanup thread: " + e);
+            debugMessage("missing MySQL JDBC cleanup thread: " + e);
         }
         catch (NoSuchMethodException e) {
             debugMessage( e.toString() );
@@ -323,7 +372,7 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
 
     private static Boolean killCancelTimer;
     static {
-        final String killTimer = System.getProperty("arjdbc.mysql.kill_cancel_timer");
+        final String killTimer = SafePropertyAccessor.getProperty("arjdbc.mysql.kill_cancel_timer");
         if ( killTimer != null ) killCancelTimer = Boolean.parseBoolean(killTimer);
     }
 
@@ -359,8 +408,9 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
      * NOTE: MySQL Connector/J 5.1.11 (2010-01-21) fixed the issue !
      */
     private void killCancelTimer(final Connection connection) {
-        if (connection.getClass().getClassLoader() == getRuntime().getJRubyClassLoader()) {
-            Field field = cancelTimerField();
+        final Ruby runtime = getRuntime();
+        if (connection.getClass().getClassLoader() == runtime.getJRubyClassLoader()) {
+            final Field field = cancelTimerField(runtime);
             if ( field != null ) {
                 java.util.Timer timer = null;
                 try {
@@ -386,21 +436,22 @@ public class MySQLRubyJdbcConnection extends RubyJdbcConnection {
     private static Field cancelTimer = null;
     private static boolean cancelTimerChecked = false;
 
-    private static Field cancelTimerField() {
+    private Field cancelTimerField(final Ruby runtime) {
         if ( cancelTimerChecked ) return cancelTimer;
+        final String name = "com.mysql.jdbc.ConnectionImpl";
         try {
-            Class klass = Class.forName("com.mysql.jdbc.ConnectionImpl");
+            Class<?> klass = runtime.getJavaSupport().loadJavaClass(name);
             Field field = klass.getDeclaredField("cancelTimer");
             field.setAccessible(true);
-            synchronized(MySQLRubyJdbcConnection.class) {
+            synchronized (MySQLRubyJdbcConnection.class) {
                 if ( cancelTimer == null ) cancelTimer = field;
             }
         }
         catch (ClassNotFoundException e) {
-            debugMessage("INFO: missing MySQL JDBC connection impl: " + e);
+            debugMessage("missing MySQL JDBC connection impl: " + e);
         }
         catch (NoSuchFieldException e) {
-            debugMessage("INFO: MySQL's cancel timer seems to have changed: " + e);
+            debugMessage("MySQL's cancel timer seems to have changed: " + e);
         }
         catch (SecurityException e) {
             debugMessage( e.toString() );

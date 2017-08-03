@@ -7,20 +7,20 @@ module ArJdbc
   module SQLite3
     include Util::TableCopier
 
-    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
-    def self.jdbc_connection_class
-      ::ActiveRecord::ConnectionAdapters::SQLite3JdbcConnection
-    end
+    JdbcConnection = ::ActiveRecord::ConnectionAdapters::SQLite3JdbcConnection
 
-    def jdbc_column_class; ::ActiveRecord::ConnectionAdapters::SQLite3Column end
+    # @deprecated
+    # @see ActiveRecord::ConnectionAdapters::JdbcAdapter#jdbc_connection_class
+    def self.jdbc_connection_class; JdbcConnection end
 
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn#column_types
     def self.column_selector
-      [ /sqlite/i, lambda { |config, column| column.extend(Column) } ]
+      [ /sqlite/i, lambda { |config, column| column.extend(ColumnMethods) } ]
     end
 
+    # @private
     # @see ActiveRecord::ConnectionAdapters::JdbcColumn
-    module Column
+    module ColumnMethods
 
       # @override {ActiveRecord::ConnectionAdapters::JdbcColumn#init_column}
       def init_column(name, default, *args)
@@ -237,9 +237,18 @@ module ArJdbc
       quote_column_name(attr)
     end if ::ActiveRecord::VERSION::MAJOR >= 4
 
-    # @override
-    def quote_column_name(name)
-      %Q("#{name.to_s.gsub('"', '""')}") # "' kludge for emacs font-lock
+    def type_cast(value, column)
+      return value.to_f if BigDecimal === value
+      return super unless String === value
+      return super unless column && value
+
+      value = super
+      if column.type == :string &&
+        value.respond_to?(:encoding) && value.encoding == Encoding::ASCII_8BIT
+        logger.error "Binary data inserted for `string` type on column `#{column.name}`" if logger
+        value = value.encode Encoding::UTF_8
+      end
+      value
     end
 
     # Quote date/time values for use in SQL input.
@@ -262,7 +271,7 @@ module ArJdbc
         sql << " AND NOT name = 'sqlite_sequence'"
       end
 
-      select_rows(sql, name).map { |row| row[0] }
+      select_rows(sql, name).map! { |row| row[0] }
     end
 
     # @override
@@ -282,19 +291,45 @@ module ArJdbc
       index_name_length - 2
     end
 
+    # NOTE: handled by JdbcAdapter only to have statements in logs :
+
+    # @override
+    def begin_db_transaction
+      # NOTE: based on TX mode SQLite-JDBC does "begin;"
+      # "begin immediate;" or "begin exclusive;" on setAutoCommit(false)
+      log('BEGIN') { @connection.begin }
+    end
+
+    # @override
+    def commit_db_transaction
+      log('COMMIT') { @connection.commit }
+    end
+
+    # @override
+    def rollback_db_transaction
+      log('ROLLBACK') { @connection.rollback }
+    end
+
+    # @override on **AR-4.0**
+    def begin_isolated_db_transaction(isolation)
+      log("/* TRANSACTION_#{isolation.to_s.upcase} */; BEGIN") do
+        @connection.begin(isolation)
+      end
+    end
+
     # @override
     def create_savepoint(name = current_savepoint_name(true))
-      log("SAVEPOINT #{name}", 'Savepoint') { super }
+      log("SAVEPOINT #{name}") { @connection.create_savepoint(name) }
     end
 
     # @override
     def rollback_to_savepoint(name = current_savepoint_name(true))
-      log("ROLLBACK TO SAVEPOINT #{name}", 'Savepoint') { super }
+      log("ROLLBACK TO SAVEPOINT #{name}") { @connection.rollback_savepoint(name) }
     end
 
     # @override
     def release_savepoint(name = current_savepoint_name(false))
-      log("RELEASE SAVEPOINT #{name}", 'Savepoint') { super }
+      log("RELEASE SAVEPOINT #{name}") { @connection.release_savepoint(name) }
     end
 
     # @private
@@ -358,15 +393,14 @@ module ArJdbc
 
     # @override
     def columns(table_name, name = nil)
-      column = jdbc_column_class
       pass_cast_type = respond_to?(:lookup_cast_type)
       table_structure(table_name).map do |field|
         sql_type = field['type']
         if pass_cast_type
           cast_type = lookup_cast_type(sql_type)
-          column.new(field['name'], field['dflt_value'], cast_type, sql_type, field['notnull'] == 0)
+          Column.new(field['name'], field['dflt_value'], cast_type, sql_type, field['notnull'] == 0)
         else
-          column.new(field['name'], field['dflt_value'], sql_type, field['notnull'] == 0)
+          Column.new(field['name'], field['dflt_value'], sql_type, field['notnull'] == 0)
         end
       end
     end
@@ -548,11 +582,11 @@ module ArJdbc
       include Comparable
 
       def initialize(version_string)
-        @version = version_string.split('.').map! { |v| v.to_i }
+        @version = version_string.split('.').map!(&:to_i)
       end
 
       def <=>(version_string)
-        @version <=> version_string.split('.').map! { |v| v.to_i }
+        @version <=> version_string.split('.').map!(&:to_i)
       end
 
       def to_s
@@ -566,46 +600,42 @@ end
 
 module ActiveRecord::ConnectionAdapters
 
-  # NOTE: SQLite3Column exists in native adapter since AR 4.0
-  remove_const(:SQLite3Column) if const_defined?(:SQLite3Column)
-
-  class SQLite3Column < JdbcColumn
-    include ArJdbc::SQLite3::Column
-
-    def initialize(name, *args)
-      if Hash === name
-        super
-      else
-        super(nil, name, *args)
-      end
-    end
-
-    def self.string_to_binary(value)
-      value
-    end
-
-    def self.binary_to_string(value)
-      if value.respond_to?(:encoding) && value.encoding != Encoding::ASCII_8BIT
-        value = value.force_encoding(Encoding::ASCII_8BIT)
-      end
-      value
-    end
-  end
-
   remove_const(:SQLite3Adapter) if const_defined?(:SQLite3Adapter)
-
   class SQLite3Adapter < JdbcAdapter
-    include ArJdbc::SQLite3
-    include ArJdbc::SQLite3::ExplainSupport
-
-    def jdbc_connection_class(spec)
-      ::ArJdbc::SQLite3.jdbc_connection_class
-    end
+    include ::ArJdbc::SQLite3
+    include ::ArJdbc::SQLite3::ExplainSupport
 
     # @private
     Version = ArJdbc::SQLite3::Version
 
+    class Column < JdbcColumn
+      include ::ArJdbc::SQLite3::ColumnMethods
+
+      def initialize(name, *args)
+        if Hash === name
+          super
+        else
+          super(nil, name, *args)
+        end
+      end
+
+      def self.string_to_binary(value)
+        value
+      end
+
+      def self.binary_to_string(value)
+        if value.respond_to?(:encoding) && value.encoding != Encoding::ASCII_8BIT
+          value = value.force_encoding(Encoding::ASCII_8BIT)
+        end
+        value
+      end
+    end
+
   end
+
+  # NOTE: SQLite3Column exists in native adapter since AR 4.0
+  remove_const(:SQLite3Column) if const_defined?(:SQLite3Column)
+  SQLite3Column = SQLite3Adapter::Column
 
   if ActiveRecord::VERSION::MAJOR <= 3
     remove_const(:SQLiteColumn) if const_defined?(:SQLiteColumn)
@@ -614,5 +644,11 @@ module ActiveRecord::ConnectionAdapters
     remove_const(:SQLiteAdapter) if const_defined?(:SQLiteAdapter)
 
     SQLiteAdapter = SQLite3Adapter
+  end
+end
+
+module ArJdbc
+  module SQLite3
+    Column = ::ActiveRecord::ConnectionAdapters::SQLite3Adapter::Column
   end
 end

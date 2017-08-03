@@ -3,7 +3,6 @@ require 'simple'
 
 class OracleSimpleTest < Test::Unit::TestCase
   include SimpleTestMethods
-  include ActiveRecord3TestMethods
   include DirtyAttributeTests
   include XmlColumnTestMethods
 
@@ -210,6 +209,18 @@ class OracleSimpleTest < Test::Unit::TestCase
       loosers = Class.new(ActiveRecord::Base)
       loosers.table_name = 'loosers'
       assert_kind_of ActiveRecord::Base, loosers.find(user.id)
+    ensure
+      disable_logger do
+        CreateUsers.up rescue nil
+        ActiveRecord::Base.connection.drop_table("loosers") rescue nil
+      end
+    end
+  end
+
+  def test_rename_table_without_seq
+    ActiveRecord::Base.connection.execute 'DROP SEQUENCE "USERS_SEQ"'
+    begin
+      ActiveRecord::Base.connection.rename_table 'users', 'loosers'
     ensure
       disable_logger do
         CreateUsers.up rescue nil

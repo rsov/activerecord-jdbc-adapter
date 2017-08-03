@@ -6,7 +6,8 @@ module ActiveRecord
         def array?; !!@array; end
       end
 
-      module ColumnMethods
+      # @private
+      module ColumnHelpers
         def xml(*args)
           options = args.extract_options!
           column(args[0], 'xml', options)
@@ -83,7 +84,7 @@ module ActiveRecord
       end
 
       class TableDefinition < ActiveRecord::ConnectionAdapters::TableDefinition
-        include ColumnMethods
+        include ColumnHelpers
 
         def primary_key(name, type = :primary_key, options = {})
           return super unless type == :uuid
@@ -124,7 +125,7 @@ module ActiveRecord
       end
 
       class Table < ActiveRecord::ConnectionAdapters::Table
-        include ColumnMethods
+        include ColumnHelpers
       end
     end
   end

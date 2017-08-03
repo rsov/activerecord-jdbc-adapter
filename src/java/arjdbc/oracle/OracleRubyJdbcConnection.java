@@ -34,6 +34,7 @@ package arjdbc.oracle;
 import arjdbc.jdbc.Callable;
 import arjdbc.jdbc.RubyJdbcConnection;
 import arjdbc.util.CallResultSet;
+import arjdbc.util.StringHelper;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -41,7 +42,6 @@ import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSetMetaData;
 import java.sql.Statement;
@@ -53,6 +53,7 @@ import java.util.regex.Pattern;
 import org.jruby.Ruby;
 import org.jruby.RubyArray;
 import org.jruby.RubyClass;
+import org.jruby.RubyFixnum;
 import org.jruby.RubyString;
 import org.jruby.anno.JRubyMethod;
 import org.jruby.runtime.ObjectAllocator;
@@ -63,21 +64,27 @@ import org.jruby.runtime.builtin.IRubyObject;
  *
  * @author nicksieger
  */
+@org.jruby.anno.JRubyClass(name = "ActiveRecord::ConnectionAdapters::OracleJdbcConnection")
 public class OracleRubyJdbcConnection extends RubyJdbcConnection {
     private static final long serialVersionUID = -6469731781108431512L;
 
-    protected OracleRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
+    public OracleRubyJdbcConnection(Ruby runtime, RubyClass metaClass) {
         super(runtime, metaClass);
     }
 
     public static RubyClass createOracleJdbcConnectionClass(Ruby runtime, RubyClass jdbcConnection) {
-        final RubyClass clazz = RubyJdbcConnection.getConnectionAdapters(runtime).
-            defineClassUnder("OracleJdbcConnection", jdbcConnection, ORACLE_JDBCCONNECTION_ALLOCATOR);
+        final RubyClass clazz = getConnectionAdapters(runtime).
+            defineClassUnder("OracleJdbcConnection", jdbcConnection, ALLOCATOR);
         clazz.defineAnnotatedMethods(OracleRubyJdbcConnection.class);
         return clazz;
     }
 
-    private static ObjectAllocator ORACLE_JDBCCONNECTION_ALLOCATOR = new ObjectAllocator() {
+    public static RubyClass load(final Ruby runtime) {
+        RubyClass jdbcConnection = getJdbcConnection(runtime);
+        return createOracleJdbcConnectionClass(runtime, jdbcConnection);
+    }
+
+    protected static ObjectAllocator ALLOCATOR = new ObjectAllocator() {
         public IRubyObject allocate(Ruby runtime, RubyClass klass) {
             return new OracleRubyJdbcConnection(runtime, klass);
         }
@@ -91,11 +98,11 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
                 try {
                     statement = connection.createStatement();
                     value = statement.executeQuery("SELECT "+ sequence +".NEXTVAL id FROM dual");
-                    if ( ! value.next() ) return context.getRuntime().getNil();
-                    return context.getRuntime().newFixnum( value.getLong(1) );
+                    if ( ! value.next() ) return context.nil;
+                    return RubyFixnum.newFixnum(context.runtime, value.getLong(1));
                 }
                 catch (final SQLException e) {
-                    debugMessage(context, "failed to get " + sequence + ".NEXTVAL : " + e.getMessage());
+                    debugMessage(context.runtime, "failed to get " + sequence + ".NEXTVAL : " + e.getMessage());
                     throw e;
                 }
                 finally { close(value); close(statement); }
@@ -105,8 +112,8 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
 
     @JRubyMethod(name = "execute_insert_returning", required = 2)
     public IRubyObject execute_insert_returning(final ThreadContext context,
-        final IRubyObject sql, final IRubyObject binds) {
-        final String query = sql.convertToString().getUnicodeValue();
+        final IRubyObject sql, final IRubyObject binds) throws SQLException {
+        final String query = sqlString(sql);
         final int outType = Types.VARCHAR;
         if ( binds == null || binds.isNil() ) { // no prepared statements
             return executePreparedCall(context, query, Collections.EMPTY_LIST, outType);
@@ -127,7 +134,7 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
                     statement.registerOutParameter(outIndex, outType);
                     statement.executeUpdate();
                     ResultSet resultSet = new CallResultSet(statement);
-                    return jdbcToRuby(context, context.getRuntime(), outIndex, outType, resultSet);
+                    return jdbcToRuby(context, context.runtime, outIndex, outType, resultSet);
                 }
                 catch (final SQLException e) {
                     debugErrorSQL(context, query);
@@ -169,11 +176,9 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
         // NOTE: it's likely a ROWID which we do not care about :
         final String value = genKeys.getString(1); // "AAAsOjAAFAAABUlAAA"
         if ( isPositiveInteger(value) ) {
-            return runtime.newFixnum( Long.parseLong(value) );
+            return RubyFixnum.newFixnum( runtime, Long.parseLong(value) );
         }
-        else {
-            return returnRowID ? runtime.newString(value) : runtime.getNil();
-        }
+        return returnRowID ? RubyString.newString(runtime, value) : runtime.getNil();
     }
 
     private static boolean isPositiveInteger(final String value) {
@@ -188,7 +193,7 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
         final Ruby runtime, final ResultSet resultSet, final int column)
         throws SQLException {
         final String value = resultSet.getString(column);
-        if ( value == null ) return runtime.getNil();
+        if ( value == null ) return context.nil;
         return RubyString.newUnicodeString(runtime, value);
     }
 
@@ -198,7 +203,9 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
         throws SQLException, IOException {
         final Reader reader = resultSet.getCharacterStream(column);
         try {
-            if ( resultSet.wasNull() ) return RubyString.newEmptyString(runtime);
+            if ( reader == null || resultSet.wasNull() ) {
+                return RubyString.newEmptyString(runtime);
+            }
 
             final int bufSize = streamBufferSize;
             final StringBuilder string = new StringBuilder(bufSize);
@@ -208,7 +215,7 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
                 string.append(buf, 0, len);
             }
 
-            return RubyString.newUnicodeString(runtime, string.toString());
+            return StringHelper.newUnicodeString(runtime, string);
         }
         finally { if ( reader != null ) reader.close(); }
     }
@@ -260,22 +267,24 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
     }
 
     @Override
-    protected RubyArray mapTables(final Ruby runtime, final DatabaseMetaData metaData,
+    protected RubyArray mapTables(final ThreadContext context, final Connection connection,
             final String catalog, final String schemaPattern, final String tablePattern,
             final ResultSet tablesSet) throws SQLException {
-        final RubyArray tables = RubyArray.newArray(runtime, 32);
+        final RubyArray tables = RubyArray.newArray(context.runtime, 24);
         while ( tablesSet.next() ) {
             String name = tablesSet.getString(TABLES_TABLE_NAME);
-            name = caseConvertIdentifierForRails(metaData, name);
-            // Handle stupid Oracle 10g RecycleBin feature
-            if ( name.startsWith("bin$") ) continue;
-            tables.append(RubyString.newUnicodeString(runtime, name));
+            // name = caseConvertIdentifierForRails(connection, name);
+            //if (name != null) {
+            name = name.toLowerCase();
+            if ( name.startsWith("bin$") ) continue; // Oracle 10g RecycleBin
+            //}
+            tables.append( cachedString(context, name) );
         }
         return tables;
     }
 
     @Override
-    protected ColumnData[] extractColumns(final Ruby runtime,
+    protected ColumnData[] extractColumns(final ThreadContext context,
         final Connection connection, final ResultSet resultSet,
         final boolean downCase) throws SQLException {
 
@@ -291,7 +300,6 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
             } else {
                 name = caseConvertIdentifierForRails(connection, name);
             }
-            final RubyString columnName = RubyString.newUnicodeString(runtime, name);
 
             int columnType = resultMetaData.getColumnType(i);
             if (columnType == Types.NUMERIC) {
@@ -307,7 +315,7 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
                 }
             }
 
-            columns[i - 1] = new ColumnData(columnName, columnType, i);
+            columns[i - 1] = new ColumnData(name, columnType, i);
         }
 
         return columns;
@@ -318,16 +326,17 @@ public class OracleRubyJdbcConnection extends RubyJdbcConnection {
     // storesUpperCaseIdentifiers() return true;
 
     @Override
-    protected String caseConvertIdentifierForRails(final Connection connection, final String value)
-        throws SQLException {
+    protected String caseConvertIdentifierForRails(final Connection connection, final String value) {
         return value == null ? null : value.toLowerCase();
     }
 
     @Override
-    protected String caseConvertIdentifierForJdbc(final Connection connection, final String value)
-        throws SQLException {
+    protected String caseConvertIdentifierForJdbc(final Connection connection, final String value) {
         return value == null ? null : value.toUpperCase();
     }
+
+    //@Override
+    //protected boolean useByteStrings() { return true; }
 
     // based on OracleEnhanced's Ruby connection.describe
     @JRubyMethod(name = "describe", required = 1)
