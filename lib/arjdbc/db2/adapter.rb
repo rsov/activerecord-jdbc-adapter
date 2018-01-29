@@ -365,6 +365,14 @@ module ArJdbc
 
       column_type = column && column.type.to_sym
 
+      # Fix for situation: Column has serialization that turns nils into to 0 or ''
+      # Active Record is skipping serialization for nil values for some reason,
+      #   so we will get the serialized value here and pass it to be quoted
+      if column.respond_to?(:cast_type) && column.cast_type.is_a?(ActiveRecord::Type::Serialized)
+        return quote(column.cast_type.coder.dump(value))
+      end if ::ActiveRecord::VERSION::MAJOR >= 4
+
+
       case value
         when Numeric # IBM_DB doesn't accept quotes on numeric types
           # if the column type is text or string, return the quote value
